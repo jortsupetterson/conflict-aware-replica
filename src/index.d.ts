@@ -76,8 +76,8 @@ export class TextRGA {
     localCounter?: number,
     entries?: Record<string, TextRGAEntry>,
     order?: string[],
-    onInsert?: (info: TextRGAInsertInfo) => void,
-    onDelete?: (info: TextRGADeleteInfo) => void
+    onInsert?: (info: TextRGAInsertInfo) => void | null,
+    onDelete?: (info: TextRGADeleteInfo) => void | null
   );
   insertAt(index: number, char: string): string;
   deleteAt(index: number): void;
