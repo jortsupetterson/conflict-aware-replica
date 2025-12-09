@@ -1,6 +1,6 @@
 {
   "name": "simple-crdts",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Tiny CRDT helpers: Last-Writer-Wins register, PN-Counter, and TextRGA you can merge across offline/online nodes.",
   "keywords": [
     "crdt",
