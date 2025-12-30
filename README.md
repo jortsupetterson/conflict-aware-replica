@@ -4,6 +4,10 @@
 
 /// THESE ARE NOT MEANT FOR SYSTEM ONLY CONFLICT RESOLVING THAT USERS ACTION DO NOT AFFECT IN ANY SHAPE OR FORM, IF THAT IS WHAT YOU NEED CHECK SOMETHING ELSE eg. <INSERT INDUSTRY STANDARD CRDT NPM PACKAGE URL HERE>
 
+/// MultiWriterText is meant to be used for states in elements like that are written with a keyboard like input type="text", textarea, or even input type number
+
+/// LIWRegister is meant to be used for everything else like color, selection, choice etc.
+
 Lightweight, zero-dependency CRDT primitives you can drop into offline-first or multi-node apps. Ships with a Last-Writer-Wins register, a PN-Counter, and a Text RGA (text CRDT) plus ready-to-use JSON serialization and TypeScript typings.
 
 ## Features
