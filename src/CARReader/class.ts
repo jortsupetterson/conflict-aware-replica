@@ -6,7 +6,7 @@ export type CRDocumentField = {
   snapshot: LIWRegister | MWString;
 };
 export type CRDocumentSnapshot = Record<string, CRDocumentField>;
-export class CRDocument {
+export class CARFile {
   constructor(snapshot: CRDocumentSnapshot) {
     for (const key of Object.keys(snapshot)) {
       const field = snapshot[key];
