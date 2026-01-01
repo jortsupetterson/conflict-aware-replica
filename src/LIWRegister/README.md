@@ -4,34 +4,34 @@ _For Offline-Capable Distributed User Interfaces_
 
 ## Abstract
 
-This document defines a **LATEST-INTENTION-WINS (LIW)** conflict resolution model for **single-value primitive registers** in offline-capable **distributed user interfaces**.
+This document defines a **LATEST-INTENTION-WINS (LIW)** resolution model for **single-value primitive registers** in offline-capable **distributed user interfaces**.
 
-LIW is a **UI-level intent preservation model**, not a general distributed systems consistency model.  
-It prioritizes **user intent, UX clarity, and explicit decision-making** over formal correctness, global ordering, or silent conflict resolution.
+LIW is a **UI-level intent resolution mechanism**, not a distributed systems consistency model.
+It is explicitly designed to preserve **human intent**, **UX safety**, and **explicit decision points** under imperfect network conditions.
 
-This specification matches the `LIWRegister` implementation exactly.
+This specification **matches the `LIWRegister` implementation exactly**.
 
 ---
 
 ## What This Model Is (and Is Not)
 
-### This model **is** for:
+### This model **is** for
 
 - Offline-first UIs and PWAs
-- Local-first applications
-- Realtime forms, settings, and toggles
-- Profile fields and preferences
+- Local-first application state
+- Realtime form inputs, toggles, and settings
 - Human-authored intent synchronized across devices
+- UI-level state reconciliation
 
-### This model **is not** for:
+### This model **is not** for
 
-- Database replication
-- Backend-to-backend synchronization
+- Backend replication
+- Database synchronization
+- CRDT correctness
 - Financial or ledger systems
 - Distributed consensus
-- CRDT correctness guarantees
 
-LIW assumes **humans**, **UIs**, and **imperfect clocks**.
+LIW assumes **humans**, **UIs**, and **unreliable clocks**.
 
 ---
 
@@ -41,9 +41,10 @@ LIW assumes **humans**, **UIs**, and **imperfect clocks**.
 - **Data type:** single-value register
 - **Supported value types:** `string | number | boolean`
 - **System:** multi-device, offline-capable UI
-- No centralized sequencer
-- No total order requirement
-- Offline writes may synchronize arbitrarily late
+- No central coordinator
+- No logical clocks
+- No total ordering
+- Offline writes may arrive arbitrarily late
 - Merge semantics are **application-defined**
 
 All unsupported value types are rejected at runtime.
@@ -52,132 +53,169 @@ All unsupported value types are rejected at runtime.
 
 ## Environment Requirements
 
-`LIWRegister` **requires a UI runtime** that provides:
+`LIWRegister` **requires a browser UI runtime** that provides:
 
 - `navigator.onLine: boolean`
 
-This signal indicates whether network connectivity was available **at the moment the value was written**.  
-It is treated as a **UX-level causal hint**, not a correctness guarantee.
+This signal captures whether the device was **online at the moment the value was written**.
 
-Construction **must fail** if this signal is unavailable.  
-LIW is not defined for headless or backend-only runtimes.
+It is treated strictly as a **UX-level signal**, not a correctness guarantee.
 
----
+If `navigator.onLine` is unavailable, **construction fails immediately**.
 
-## Available Signals
-
-Each competing value carries exactly:
-
-- `storedTimestamp`
-- `receivedTimestamp`
-- `receivedWasOnlineAtWrite` (`navigator.onLine` at creation time)
-
-No logical clocks, counters, thresholds, or coordination metadata are assumed.
+LIW is **undefined** in headless, server-side, or backend-only runtimes.
 
 ---
 
-## Core Philosophy
+## Register State
 
-**Assume the received value represents newer user intent by default.**  
-Override this assumption **only when available signals make it unsafe**.
+Each register instance carries exactly:
 
-The system must be optimistic, but never destructive.
+- `value: string | number | boolean`
+- `online: boolean` (captured at creation time)
+- `timestamp: number` (wall-clock milliseconds)
+
+No other metadata exists or is inferred.
+
+---
+
+## Snapshot Format
+
+A register may be serialized as a snapshot string:
+
+```ts
+type LIWSnapshot = `{"value":${
+  | string
+  | number
+  | boolean},"online":${boolean},"timestamp":${number}}`;
+```
+
+Snapshots are JSON-encoded and parsed during resolution.
+
+---
+
+## Resolution API (Authoritative)
+
+### `resolveIntent(snapshot): Promise<void>`
+
+- Accepts a serialized `LIWSnapshot`
+- Parses it into a **received** `LIWRegister`
+- Compares it against the **stored** instance (`this`)
+- **Does not return a value**
+- **Does not mutate the stored instance**
+- Emits the resolution result via callbacks
+
+State updates are **external** to the register.
+
+---
+
+## Required Callbacks
+
+### `onresolved(resolved: LIWRegister)`
+
+- **Mandatory**
+- Called exactly once per `resolveIntent()` invocation
+- Receives the final resolved register instance
+- Caller is responsible for storing or applying it
+
+If missing, resolution fails with a runtime error.
+
+---
+
+### `onconflict(received, stored): Promise<LIWRegister>`
+
+- **Required only in conflict scenarios**
+- Must return a `LIWRegister`
+- May be asynchronous
+- May return either:
+
+  - a new instance, or
+  - one of the provided instances
+
+Invalid return values cause a runtime error.
+
+---
+
+## Type Safety Rules
+
+- `typeof received.value` **must match** `typeof stored.value`
+- Mismatched value types cause immediate failure
+- No coercion or conversion is allowed
 
 ---
 
 ## Decision Model (Exact Semantics)
 
-# Online + non-newer timestamp → uncertainty
+Let:
 
-if receivedWasOnlineAtWrite == true
-and receivedTs <= storedTs:
-invoke explicit conflict handler
-return merged result
+- `receivedTs = received.timestamp`
+- `storedTs = this.timestamp`
+- `receivedOnline = received.online`
 
-# Offline + non-newer timestamp → clearly stale
+### 1. Online + non-newer timestamp → explicit conflict
 
-if receivedWasOnlineAtWrite == false
-and receivedTs <= storedTs:
-ignore and keep stored
-return stored
-
-# Default: accept received as newest intent
-
-return received
-
----
-
-## Immutability and API Semantics
-
-`LIWRegister` exposes an **immutable-style API**.
-
-- `resolveIntent()` **never mutates** the existing instance
-- It returns either:
-
-  - the same instance (`this`), or
-  - a **new `LIWRegister` instance** representing the resolved intent
-
-### Correct Usage
-
-```js
-register = await register.resolveIntent(received);
+```text
+if receivedOnline === true
+and receivedTs <= storedTs
 ```
 
-Ignoring the return value **does not update state**.
+- Resolution is **ambiguous**
+- `onconflict(received, stored)` is invoked
+- The returned `LIWRegister` is passed to `onresolved`
 
-This design:
-
-- prevents accidental side effects
-- forces explicit state updates
-- aligns with predictable UI state management
+If `onconflict` is missing → runtime error.
 
 ---
 
-## Conflict Handling
+### 2. Offline + non-newer timestamp → clearly stale
 
-- Conflict handling is **mandatory**
-- Silent fallback is forbidden
-- `onconflict` **must exist**
-- `onconflict` **must return a new `LIWRegister`**
-- Invalid returns are runtime errors
+```text
+if receivedOnline === false
+and receivedTs <= storedTs
+```
 
-LIW does not guess merge semantics.
-The UI/application owns reconciliation logic.
-
----
-
-## Rationale
-
-### Online + Older or Equal Timestamp
-
-This represents **irreducible uncertainty**:
-
-- equal timestamps cannot be ordered
-- older timestamps may result from clock skew or reordering
-- the user was online, so concurrent intent is plausible
-
-Automatic overwrite or ignore would silently destroy intent.
-The UI must surface this via an explicit conflict handler.
+- Received intent is treated as stale
+- Stored register is kept
+- `onresolved(stored)` is called
+- No conflict handler is invoked
 
 ---
 
-### Offline + Older or Equal Timestamp
+### 3. Default → accept received
 
-This is treated as **clearly stale intent**.
+All other cases:
 
-The correct UX action is to keep the stored value and later push it back to the offline device.
+- Received intent is accepted
+- `onresolved(received)` is called
 
-No merge is attempted.
+This includes:
+
+- newer timestamps
+- offline → online transitions
+- uncertain but forward-moving state
 
 ---
 
-### Default Accept
+## Core Philosophy
 
-If neither uncertainty nor staleness applies, the received value is accepted as the best available estimate of newer user intent.
+> **Assume the received value represents the newest user intent —
+> unless available UX signals make that unsafe.**
 
-This matches user expectation:
+The system is optimistic by default, but **never silently destructive**.
 
-> “What I just changed should win.”
+---
+
+## Conflict Semantics
+
+Conflict resolution is:
+
+- Explicit
+- Mandatory
+- Application-defined
+
+LIW **never guesses** merge behavior.
+
+The UI owns reconciliation.
 
 ---
 
@@ -185,34 +223,33 @@ This matches user expectation:
 
 This LIW model:
 
-- operates strictly at the UI state layer
-- uses wall-clock timestamps as heuristics
+- operates strictly at the UI layer
+- uses wall-clock time as a heuristic
 - uses online/offline state as a UX signal
-- rejects global time correctness
-- forbids silent intent loss
-- scales to long offline periods
+- avoids silent intent loss
+- tolerates long offline periods
+- makes ambiguity visible
 - preserves user trust
 
 ---
 
-## Limitations
+## Limitations (Intentional)
 
 - No correctness guarantees
 - No total ordering
-- Not safe for backend replication
-- Ambiguity requires UI-level resolution
+- No convergence proofs
+- Not suitable for backend replication
 
-These limitations are **intentional and explicit**.
+These constraints are **by design**, not omissions.
 
 ---
 
 ## Conclusion
 
-`LIWRegister` defines a **distributed UI intent model**, not a distributed systems consistency model.
+`LIWRegister` is not a CRDT, not a database primitive, and not a consensus tool.
 
-It exists to answer one question only:
+It exists to answer exactly one question:
 
-**“What is the least harmful thing to do for the user right now?”**
+> **“What is the least harmful thing to do for the user right now?”**
 
-Anything stronger requires different tools.
-Anything simpler hides failure.
+Anything stronger requires different abstractions.

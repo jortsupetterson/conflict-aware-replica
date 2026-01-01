@@ -20,3 +20,15 @@ It is a file format that extends JSON, paired with a specified handler named `CA
 The goal of this project is to standardize an application state model that prioritizes **user intention** and provides a **user interface–compatible programming interface**.
 
 The model is designed to make it straightforward to establish a reactive connection between the state stored in a `.car` file and the state produced by user interface components. Changes performed by an actor with valid access—at the moment they perceive the change to occur on their own machine—must be preserved during merges. This behavior is enforced through hierarchical access control rules and backed by a cryptographically verifiable trust model.
+
+## Rationale
+
+In real production systems controlled by multiple users and constantly changing conditions, it is impossible to eliminate conflicts from the user’s perspective. Instead of attempting to pretend conflicts do not exist, `.car` is designed to be explicitly aware of production system realities and to handle conflicts in a standardized, secure, and efficient way.
+
+## What this is not
+
+This is not a mathematically proven model to ensure conflict free backend systems.
+
+## What this is
+
+This is a frontend optimized conflict aware application state model that co exists with CRDT backendsystems
