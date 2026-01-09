@@ -9,13 +9,12 @@ import { CRSet } from "../CRSet/class.js";
 import { CRText } from "../CRText/class.js";
 import { AclLog } from "./acl.js";
 import { HLC, compareHLC } from "./clock.js";
-import { decodeToken, signToken, verifyToken } from "./crypto.js";
+import { decodeToken, encodeToken, signToken, verifyToken } from "./crypto.js";
 import {
   type AclAssignment,
   type DacumentEventMap,
   type DocFieldAccess,
   type DocSnapshot,
-  type DocValue,
   type FieldSchema,
   type JsTypeName,
   type JsValue,
@@ -38,6 +37,8 @@ import {
 } from "./types.js";
 
 const TOKEN_TYP = "DACOP";
+
+type SigningRole = "owner" | "manager" | "editor";
 
 type FieldState = {
   schema: FieldSchema;
@@ -159,8 +160,19 @@ function createEmptyField(
   }
 }
 
-function roleNeedsKey(role: Role): role is "owner" | "manager" | "editor" {
+function roleNeedsKey(role: Role): role is SigningRole {
   return role === "owner" || role === "manager" || role === "editor";
+}
+
+function parseSignerRole(
+  kid: string | undefined,
+  issuer: string
+): SigningRole | null {
+  if (!kid) return null;
+  const [kidIssuer, role] = kid.split(":");
+  if (kidIssuer !== issuer) return null;
+  if (role === "owner" || role === "manager" || role === "editor") return role;
+  return null;
 }
 
 async function generateRoleKeys(): Promise<RoleKeys> {
@@ -183,18 +195,41 @@ function toPublicRoleKeys(roleKeys: RoleKeys): RolePublicKeys {
 }
 
 export class Dacument<S extends SchemaDefinition> {
-  static schema = <Schema extends SchemaDefinition>(schema: Schema): Schema => schema;
+  private static actorId?: string;
+
+  static setActorId(actorId: string): void {
+    if (Dacument.actorId) return;
+    if (!Dacument.isValidActorId(actorId))
+      throw new Error("Dacument.setActorId: actorId must be 256-bit base64url");
+    Dacument.actorId = actorId;
+  }
+
+  private static requireActorId(): string {
+    if (!Dacument.actorId)
+      throw new Error("Dacument: actorId not set; call Dacument.setActorId()");
+    return Dacument.actorId;
+  }
+
+  private static isValidActorId(actorId: string): boolean {
+    if (typeof actorId !== "string") return false;
+    try {
+      const bytes = Bytes.fromBase64UrlString(actorId);
+      return bytes.byteLength === 32 && actorId.length === 43;
+    } catch {
+      return false;
+    }
+  }
+
+  static schema = <Schema extends SchemaDefinition>(schema: Schema): Schema => {
+    Dacument.requireActorId();
+    return schema;
+  };
   static register = register;
   static text = text;
   static array = array;
   static set = set;
   static map = map;
   static record = record;
-
-  static generateId(): string {
-    return generateNonce();
-  }
-
 
   static async computeSchemaId(schema: SchemaDefinition): Promise<SchemaId> {
     const normalized = schemaIdInput(schema);
@@ -209,7 +244,6 @@ export class Dacument<S extends SchemaDefinition> {
 
   static async create<Schema extends SchemaDefinition>(params: {
     schema: Schema;
-    ownerId: string;
     docId?: string;
   }): Promise<{
     docId: string;
@@ -217,18 +251,17 @@ export class Dacument<S extends SchemaDefinition> {
     roleKeys: RoleKeys;
     snapshot: DocSnapshot;
   }> {
-    if (!params.ownerId)
-      throw new Error("Dacument.create: ownerId is required");
-    const docId = params.docId ?? Dacument.generateId();
+    const ownerId = Dacument.requireActorId();
+    const docId = params.docId ?? generateNonce();
     const schemaId = await Dacument.computeSchemaId(params.schema);
     const roleKeys = await generateRoleKeys();
     const publicKeys = toPublicRoleKeys(roleKeys);
 
-    const clock = new HLC(params.ownerId);
+    const clock = new HLC(ownerId);
     const header = {
       alg: "ES256",
       typ: TOKEN_TYP,
-      kid: `${params.ownerId}:owner`,
+      kid: `${ownerId}:owner`,
     } as const;
     const ops: SignedOp[] = [];
 
@@ -252,7 +285,7 @@ export class Dacument<S extends SchemaDefinition> {
     };
 
     await sign({
-      iss: params.ownerId,
+      iss: ownerId,
       sub: docId,
       iat: nowSeconds(),
       stamp: clock.next(),
@@ -260,7 +293,7 @@ export class Dacument<S extends SchemaDefinition> {
       schema: schemaId,
       patch: {
         id: uuidv7(),
-        target: params.ownerId,
+        target: ownerId,
         role: "owner",
       },
     });
@@ -277,7 +310,7 @@ export class Dacument<S extends SchemaDefinition> {
         )
           throw new Error(`Dacument.create: '${field}' failed regex`);
         await sign({
-          iss: params.ownerId,
+          iss: ownerId,
           sub: docId,
           iat: nowSeconds(),
           stamp: clock.next(),
@@ -303,7 +336,7 @@ export class Dacument<S extends SchemaDefinition> {
         );
         if (nodes.length)
           await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -333,7 +366,7 @@ export class Dacument<S extends SchemaDefinition> {
         );
         if (nodes.length)
           await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -365,7 +398,7 @@ export class Dacument<S extends SchemaDefinition> {
         );
         if (nodes.length)
           await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -404,7 +437,7 @@ export class Dacument<S extends SchemaDefinition> {
         );
         if (nodes.length)
           await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -436,7 +469,7 @@ export class Dacument<S extends SchemaDefinition> {
         );
         if (nodes.length)
           await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -460,23 +493,20 @@ export class Dacument<S extends SchemaDefinition> {
 
   static async load<Schema extends SchemaDefinition>(params: {
     schema: Schema;
-    actorId: string;
     roleKey?: JsonWebKey;
     snapshot: DocSnapshot;
   }): Promise<DacumentDoc<Schema>> {
+    const actorId = Dacument.requireActorId();
     const schemaId = await Dacument.computeSchemaId(params.schema);
     const doc = new Dacument<Schema>({
       schema: params.schema,
       schemaId,
       docId: params.snapshot.docId,
-      actorId: params.actorId,
       roleKey: params.roleKey,
       roleKeys: params.snapshot.roleKeys,
     }) as DacumentDoc<Schema>;
 
-    const result = await doc.merge(params.snapshot.ops);
-    if (result.rejected)
-      throw new Error("Dacument.load: snapshot contains invalid ops");
+    await doc.merge(params.snapshot.ops);
     return doc;
   }
 
@@ -491,14 +521,40 @@ export class Dacument<S extends SchemaDefinition> {
   private readonly roleKeys: RolePublicKeys;
   private readonly opLog: SignedOp[] = [];
   private readonly opTokens = new Set<string>();
+  private readonly verifiedOps = new Map<
+    string,
+    { payload: OpPayload; signerRole: SigningRole | null }
+  >();
+  private readonly appliedTokens = new Set<string>();
   private currentRole: Role;
   private readonly revokedCrdtByField = new Map<string, FieldState["crdt"]>();
+  private readonly deleteStampsByField = new Map<
+    string,
+    Map<string, AclAssignment["stamp"]>
+  >();
+  private readonly tombstoneStampsByField = new Map<
+    string,
+    Map<string, AclAssignment["stamp"]>
+  >();
+  private readonly deleteNodeStampsByField = new Map<
+    string,
+    Map<string, AclAssignment["stamp"]>
+  >();
   private readonly eventListeners = new Map<
     keyof DacumentEventMap,
     Set<(event: DacumentEventMap[keyof DacumentEventMap]) => void>
   >();
   private readonly pending = new Set<Promise<void>>();
   private readonly ackByActor = new Map<string, AclAssignment["stamp"]>();
+  private suppressMerge = false;
+  private ackScheduled = false;
+  private lastGcBarrier: AclAssignment["stamp"] | null = null;
+
+  private snapshotFieldValues(): Map<string, unknown> {
+    const values = new Map<string, unknown>();
+    for (const key of this.fields.keys()) values.set(key, this.fieldValue(key));
+    return values;
+  }
 
   public readonly acl: {
     setRole: (actorId: string, role: Role) => void;
@@ -511,14 +567,14 @@ export class Dacument<S extends SchemaDefinition> {
     schema: S;
     schemaId: SchemaId;
     docId: string;
-    actorId: string;
     roleKey?: JsonWebKey;
     roleKeys: RolePublicKeys;
   }) {
+    const actorId = Dacument.requireActorId();
     this.schema = params.schema;
     this.schemaId = params.schemaId;
     this.docId = params.docId;
-    this.actorId = params.actorId;
+    this.actorId = actorId;
     this.roleKey = params.roleKey;
     this.roleKeys = params.roleKeys;
     this.clock = new HLC(this.actorId);
@@ -603,47 +659,6 @@ export class Dacument<S extends SchemaDefinition> {
     if (listeners.size === 0) this.eventListeners.delete(type);
   }
 
-  onChange(listener: (ops: SignedOp[]) => void): () => void {
-    const handler = (event: DacumentEventMap["change"]) => listener(event.ops);
-    this.addEventListener("change", handler);
-    return () => this.removeEventListener("change", handler);
-  }
-
-  onFieldChange<K extends keyof S & string>(
-    field: K,
-    listener: (value: DocValue<S>[K]) => void
-  ): () => void {
-    const handler = (event: DacumentEventMap["merge"]) => {
-      if (event.target === field) listener(this.fieldValue(field) as DocValue<S>[K]);
-    };
-    this.addEventListener("merge", handler);
-    return () => this.removeEventListener("merge", handler);
-  }
-
-  onAnyFieldChange(
-    listener: (field: keyof S & string, value: DocValue<S>[keyof S & string]) => void
-  ): () => void {
-    const handler = (event: DacumentEventMap["merge"]) =>
-      listener(
-        event.target as keyof S & string,
-        this.fieldValue(event.target) as DocValue<S>[keyof S & string]
-      );
-    this.addEventListener("merge", handler);
-    return () => this.removeEventListener("merge", handler);
-  }
-
-  onError(listener: (error: Error) => void): () => void {
-    const handler = (event: DacumentEventMap["error"]) => listener(event.error);
-    this.addEventListener("error", handler);
-    return () => this.removeEventListener("error", handler);
-  }
-
-  onRevoked(listener: (event: DacumentEventMap["revoked"]) => void): () => void {
-    const handler = (event: DacumentEventMap["revoked"]) => listener(event);
-    this.addEventListener("revoked", handler);
-    return () => this.removeEventListener("revoked", handler);
-  }
-
   async flush(): Promise<void> {
     await Promise.all([...this.pending]);
   }
@@ -661,9 +676,16 @@ export class Dacument<S extends SchemaDefinition> {
     input: SignedOp | SignedOp[] | string | string[]
   ): Promise<{ accepted: SignedOp[]; rejected: number }> {
     const tokens = Array.isArray(input) ? input : [input];
-    const decodedOps: Array<{ token: string; payload: OpPayload }> = [];
+    const decodedOps: Array<{
+      token: string;
+      payload: OpPayload;
+      signerRole: SigningRole | null;
+    }> = [];
     const accepted: SignedOp[] = [];
     let rejected = 0;
+    let sawNewToken = false;
+    let diffActor: string | null = null;
+    let diffStamp: AclAssignment["stamp"] | null = null;
 
     for (const item of tokens) {
       const token = typeof item === "string" ? item : item.token;
@@ -681,62 +703,194 @@ export class Dacument<S extends SchemaDefinition> {
         rejected++;
         continue;
       }
-      decodedOps.push({ token, payload });
+      const isUnsignedAck =
+        decoded.header.alg === "none" &&
+        payload.kind === "ack" &&
+        decoded.header.typ === TOKEN_TYP;
+      if (decoded.header.alg === "none" && !isUnsignedAck) {
+        rejected++;
+        continue;
+      }
+      if (payload.kind === "ack" && decoded.header.alg !== "none") {
+        rejected++;
+        continue;
+      }
+
+      let stored = this.verifiedOps.get(token);
+      if (!stored) {
+        if (isUnsignedAck) {
+          stored = { payload, signerRole: null };
+        } else {
+          const signerRole = parseSignerRole(decoded.header.kid, payload.iss);
+          if (!signerRole) {
+            rejected++;
+            continue;
+          }
+          const publicKey = this.roleKeys[signerRole];
+          const verified = await verifyToken(publicKey, token, TOKEN_TYP);
+          if (!verified) {
+            rejected++;
+            continue;
+          }
+          stored = { payload, signerRole };
+        }
+        this.verifiedOps.set(token, stored);
+        if (!this.opTokens.has(token)) {
+          this.opTokens.add(token);
+          this.opLog.push({ token });
+        }
+        sawNewToken = true;
+        if (payload.kind === "acl.set") {
+          if (!diffStamp || compareHLC(payload.stamp, diffStamp) > 0) {
+            diffStamp = payload.stamp;
+            diffActor = payload.iss;
+          }
+        }
+      }
+      decodedOps.push({
+        token,
+        payload: stored.payload,
+        signerRole: stored.signerRole,
+      });
     }
 
-    decodedOps.sort((left, right) => {
+    const prevRole = this.currentRole;
+    let appliedNonAck = false;
+    if (sawNewToken) {
+      const beforeValues = this.isRevoked() ? undefined : this.snapshotFieldValues();
+      const result = this.rebuildFromVerified(new Set(this.appliedTokens), {
+        beforeValues,
+        diffActor: diffActor ?? this.actorId,
+      });
+      appliedNonAck = result.appliedNonAck;
+    }
+
+    for (const { token } of decodedOps) {
+      if (this.appliedTokens.has(token)) {
+        accepted.push({ token });
+      } else {
+        rejected++;
+      }
+    }
+
+    const nextRole = this.currentRole;
+    if (nextRole !== prevRole && nextRole === "revoked") {
+      const entry = this.aclLog.currentEntry(this.actorId);
+      this.emitRevoked(
+        prevRole,
+        entry?.by ?? this.actorId,
+        entry?.stamp ?? this.clock.current
+      );
+    }
+
+    if (appliedNonAck) this.scheduleAck();
+    this.maybeGc();
+
+    return { accepted, rejected };
+  }
+
+  private rebuildFromVerified(
+    previousApplied: Set<string>,
+    options?: {
+      beforeValues?: Map<string, unknown>;
+      diffActor?: string;
+    }
+  ): { appliedNonAck: boolean } {
+    const invalidated = new Set(previousApplied);
+    let appliedNonAck = false;
+
+    this.aclLog.reset();
+    this.ackByActor.clear();
+    this.appliedTokens.clear();
+    this.deleteStampsByField.clear();
+    this.tombstoneStampsByField.clear();
+    this.deleteNodeStampsByField.clear();
+    this.revokedCrdtByField.clear();
+
+    for (const state of this.fields.values()) {
+      state.crdt = createEmptyField(state.schema);
+    }
+
+    const ops = [...this.verifiedOps.entries()].map(([token, data]) => ({
+      token,
+      payload: data.payload,
+      signerRole: data.signerRole,
+    }));
+
+    ops.sort((left, right) => {
       const cmp = compareHLC(left.payload.stamp, right.payload.stamp);
       if (cmp !== 0) return cmp;
       if (left.token === right.token) return 0;
       return left.token < right.token ? -1 : 1;
     });
 
-    for (const { token, payload } of decodedOps) {
-      const prevRole = this.currentRole;
-      const signerRole = this.resolveSignerRole(payload);
-      if (!signerRole || !roleNeedsKey(signerRole)) {
-        rejected++;
-        continue;
+    for (const { token, payload, signerRole } of ops) {
+      let allowed = false;
+      if (payload.kind === "acl.set") {
+        if (!signerRole) continue;
+        if (
+          this.aclLog.isEmpty() &&
+          isAclPatch(payload.patch) &&
+          payload.patch.role === "owner" &&
+          payload.patch.target === payload.iss &&
+          signerRole === "owner"
+        ) {
+          allowed = true;
+        } else {
+          const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
+          if (
+            roleAt === signerRole &&
+            isAclPatch(payload.patch) &&
+            this.canWriteAcl(signerRole, payload.patch.role)
+          )
+            allowed = true;
+        }
+      } else {
+        const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
+        if (payload.kind === "ack") {
+          if (roleAt === "revoked") continue;
+          if (signerRole !== null) continue;
+          allowed = true;
+        } else if (signerRole && roleAt === signerRole) {
+          if (this.canWriteField(signerRole)) allowed = true;
+        }
       }
 
-      const publicKey = this.roleKeys[signerRole];
-      const verified = await verifyToken(publicKey, token, TOKEN_TYP);
-      if (!verified) {
-        rejected++;
-        continue;
+      if (!allowed) continue;
+
+      const emit = !previousApplied.has(token);
+      this.suppressMerge = !emit;
+      try {
+        const applied = this.applyRemotePayload(payload, signerRole);
+        if (!applied) continue;
+      } finally {
+        this.suppressMerge = false;
       }
 
-      if (payload.kind !== "acl.set" && !this.canWriteField(signerRole)) {
-        rejected++;
-        continue;
-      }
-
-      const applied = this.applyRemotePayload(payload, signerRole);
-      if (!applied) {
-        rejected++;
-        continue;
-      }
-
-      const nextRole = this.aclLog.currentRole(this.actorId);
-      if (nextRole !== prevRole) {
-        this.currentRole = nextRole;
-        if (nextRole === "revoked")
-          this.emitRevoked(prevRole, payload);
-      }
-
-      if (!this.opTokens.has(token)) {
-        this.opTokens.add(token);
-        this.opLog.push({ token });
-      }
-      accepted.push({ token });
+      this.appliedTokens.add(token);
+      invalidated.delete(token);
+      if (emit && payload.kind !== "ack") appliedNonAck = true;
     }
 
-    return { accepted, rejected };
+    this.currentRole = this.aclLog.currentRole(this.actorId);
+
+    if (
+      invalidated.size > 0 &&
+      options?.beforeValues &&
+      options.diffActor &&
+      !this.isRevoked()
+    ) {
+      this.emitInvalidationDiffs(options.beforeValues, options.diffActor);
+    }
+
+    return { appliedNonAck };
   }
 
-  ack(): void {
+  private ack(): void {
     const stamp = this.clock.next();
     const role = this.aclLog.roleAt(this.actorId, stamp);
+    if (role === "revoked")
+      throw new Error("Dacument: revoked actors cannot acknowledge");
     const seen = this.clock.current;
     this.ackByActor.set(this.actorId, seen);
     this.queueLocalOp(
@@ -751,6 +905,171 @@ export class Dacument<S extends SchemaDefinition> {
       },
       role
     );
+  }
+
+  private scheduleAck(): void {
+    if (this.ackScheduled) return;
+    if (this.currentRole === "revoked") return;
+    this.ackScheduled = true;
+    queueMicrotask(() => {
+      this.ackScheduled = false;
+      try {
+        this.ack();
+      } catch (error) {
+        this.emitError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private computeGcBarrier(): AclAssignment["stamp"] | null {
+    const actors = this.aclLog
+      .knownActors()
+      .filter((actorId) => this.aclLog.currentRole(actorId) !== "revoked");
+    if (actors.length === 0) return null;
+    let barrier: AclAssignment["stamp"] | null = null;
+    for (const actorId of actors) {
+      const seen = this.ackByActor.get(actorId);
+      if (!seen) return null;
+      if (!barrier || compareHLC(seen, barrier) < 0) barrier = seen;
+    }
+    return barrier;
+  }
+
+  private maybeGc(): void {
+    const barrier = this.computeGcBarrier();
+    if (!barrier) return;
+    if (this.lastGcBarrier && compareHLC(barrier, this.lastGcBarrier) <= 0) return;
+    this.lastGcBarrier = barrier;
+    this.compactFields(barrier);
+  }
+
+  private compactFields(barrier: AclAssignment["stamp"]): void {
+    for (const [field, state] of this.fields.entries()) {
+      if (state.schema.crdt === "text" || state.schema.crdt === "array") {
+        this.compactListField(field, state, barrier);
+        continue;
+      }
+      if (
+        state.schema.crdt === "set" ||
+        state.schema.crdt === "map" ||
+        state.schema.crdt === "record"
+      ) {
+        this.compactTombstoneField(field, state, barrier);
+      }
+    }
+  }
+
+  private compactListField(
+    field: string,
+    state: FieldState,
+    barrier: AclAssignment["stamp"]
+  ): void {
+    const deleteMap = this.deleteStampsByField.get(field);
+    if (!deleteMap || deleteMap.size === 0) return;
+    const removable = new Set<string>();
+    for (const [nodeId, stamp] of deleteMap.entries()) {
+      if (compareHLC(stamp, barrier) <= 0) removable.add(nodeId);
+    }
+    if (removable.size === 0) return;
+    const crdt = state.crdt as CRText<any> | CRArray<any>;
+    const snapshot = crdt.snapshot() as Array<{
+      id: string;
+      deleted?: boolean;
+      value: unknown;
+      after: string[];
+    }>;
+    const filtered = snapshot.filter(
+      (node) => !(node.deleted && removable.has(node.id))
+    );
+    if (filtered.length === snapshot.length) return;
+    state.crdt =
+      state.schema.crdt === "text"
+        ? new CRText(filtered as any)
+        : new CRArray(filtered as any);
+    for (const nodeId of removable) deleteMap.delete(nodeId);
+  }
+
+  private compactTombstoneField(
+    field: string,
+    state: FieldState,
+    barrier: AclAssignment["stamp"]
+  ): void {
+    const tombstoneMap = this.tombstoneStampsByField.get(field);
+    const deleteNodeMap = this.deleteNodeStampsByField.get(field);
+    if (!tombstoneMap || tombstoneMap.size === 0 || !deleteNodeMap) return;
+    const removableTags = new Set<string>();
+    for (const [tagId, stamp] of tombstoneMap.entries()) {
+      if (compareHLC(stamp, barrier) <= 0) removableTags.add(tagId);
+    }
+    if (removableTags.size === 0) return;
+
+    const snapshot = (state.crdt as any).snapshot() as Array<
+      | { op: "add"; id: string; value: unknown; key: string }
+      | { op: "rem"; id: string; key: string; targets: string[] }
+      | { op: "set"; id: string; keyId: string; key: unknown; value: unknown }
+      | { op: "del"; id: string; keyId: string; targets: string[] }
+    >;
+
+    const filtered: typeof snapshot = [];
+    const remainingDeletes = new Map<string, AclAssignment["stamp"]>();
+    const remainingTombstones = new Map<string, AclAssignment["stamp"]>();
+
+    for (const node of snapshot) {
+      if ("op" in node && node.op === "add") {
+        if (removableTags.has(node.id)) continue;
+        filtered.push(node);
+        continue;
+      }
+      if ("op" in node && node.op === "set") {
+        if (removableTags.has(node.id)) continue;
+        filtered.push(node);
+        continue;
+      }
+      if ("op" in node && (node.op === "rem" || node.op === "del")) {
+        const stamp = deleteNodeMap.get(node.id);
+        const targets = node.targets;
+        const allTargetsRemovable = targets.every((target) =>
+          removableTags.has(target)
+        );
+        if (
+          stamp &&
+          compareHLC(stamp, barrier) <= 0 &&
+          allTargetsRemovable
+        ) {
+          continue;
+        }
+        filtered.push(node);
+        if (stamp) {
+          remainingDeletes.set(node.id, stamp);
+          for (const target of targets) {
+            const existing = remainingTombstones.get(target);
+            if (!existing || compareHLC(stamp, existing) < 0)
+              remainingTombstones.set(target, stamp);
+          }
+        }
+        continue;
+      }
+      filtered.push(node);
+    }
+
+    if (filtered.length === snapshot.length) return;
+
+    if (state.schema.crdt === "set") {
+      state.crdt = new CRSet({
+        snapshot: filtered as any,
+        key: state.schema.key as (value: unknown) => string,
+      });
+    } else if (state.schema.crdt === "map") {
+      state.crdt = new CRMap({
+        snapshot: filtered as any,
+        key: state.schema.key as (value: unknown) => string,
+      });
+    } else {
+      state.crdt = new CRRecord(filtered as any);
+    }
+
+    this.deleteNodeStampsByField.set(field, remainingDeletes);
+    this.tombstoneStampsByField.set(field, remainingTombstones);
   }
 
 
@@ -910,6 +1229,53 @@ export class Dacument<S extends SchemaDefinition> {
     return crdt;
   }
 
+  private stampMapFor(
+    map: Map<string, Map<string, AclAssignment["stamp"]>>,
+    field: string
+  ): Map<string, AclAssignment["stamp"]> {
+    const existing = map.get(field);
+    if (existing) return existing;
+    const created = new Map<string, AclAssignment["stamp"]>();
+    map.set(field, created);
+    return created;
+  }
+
+  private setMinStamp(
+    map: Map<string, AclAssignment["stamp"]>,
+    id: string,
+    stamp: AclAssignment["stamp"]
+  ): void {
+    const existing = map.get(id);
+    if (!existing || compareHLC(stamp, existing) < 0) map.set(id, stamp);
+  }
+
+  private recordDeletedNode(
+    field: string,
+    nodeId: string,
+    stamp: AclAssignment["stamp"]
+  ): void {
+    const map = this.stampMapFor(this.deleteStampsByField, field);
+    this.setMinStamp(map, nodeId, stamp);
+  }
+
+  private recordTombstone(
+    field: string,
+    tagId: string,
+    stamp: AclAssignment["stamp"]
+  ): void {
+    const map = this.stampMapFor(this.tombstoneStampsByField, field);
+    this.setMinStamp(map, tagId, stamp);
+  }
+
+  private recordDeleteNodeStamp(
+    field: string,
+    nodeId: string,
+    stamp: AclAssignment["stamp"]
+  ): void {
+    const map = this.stampMapFor(this.deleteNodeStampsByField, field);
+    this.setMinStamp(map, nodeId, stamp);
+  }
+
   private createTextView(field: string, state: FieldState) {
     const doc = this;
     const readCrdt = () => doc.readCrdt(field, state) as CRText<any>;
@@ -974,9 +1340,6 @@ export class Dacument<S extends SchemaDefinition> {
         );
         return result;
       },
-      onChange(listener: (value: string) => void) {
-        return doc.onFieldChange(field as keyof S & string, listener as any);
-      },
       [Symbol.iterator]() {
         return readCrdt().toString()[Symbol.iterator]();
       },
@@ -1032,9 +1395,6 @@ export class Dacument<S extends SchemaDefinition> {
       indexOf(value: unknown) {
         return readCrdt().indexOf(value as any);
       },
-      onChange(listener: (value: unknown[]) => void) {
-        return doc.onFieldChange(field as keyof S & string, listener as any);
-      },
       [Symbol.iterator]() {
         return readCrdt()[Symbol.iterator]();
       },
@@ -1072,9 +1432,6 @@ export class Dacument<S extends SchemaDefinition> {
       },
       forEach(callback: any, thisArg?: unknown) {
         return readCrdt().forEach(callback, thisArg);
-      },
-      onChange(listener: (value: unknown[]) => void) {
-        return doc.onFieldChange(field as keyof S & string, listener as any);
       },
       [Symbol.iterator]() {
         return readCrdt()[Symbol.iterator]();
@@ -1122,9 +1479,6 @@ export class Dacument<S extends SchemaDefinition> {
       forEach(callback: any, thisArg?: unknown) {
         return readCrdt().forEach(callback, thisArg);
       },
-      onChange(listener: (value: Array<[JsValue, unknown]>) => void) {
-        return doc.onFieldChange(field as keyof S & string, listener as any);
-      },
       [Symbol.iterator]() {
         return readCrdt()[Symbol.iterator]();
       },
@@ -1138,17 +1492,7 @@ export class Dacument<S extends SchemaDefinition> {
     const doc = this;
     const readCrdt = () => doc.readCrdt(field, state) as CRRecord<any>;
     return new Proxy(
-      {
-        onChange(listener: (value: Record<string, unknown>) => void) {
-          return doc.onFieldChange(field as keyof S & string, listener as any);
-        },
-        keys() {
-          return Object.keys(readCrdt() as any);
-        },
-        toJSON() {
-          return doc.recordValue(readCrdt());
-        },
-      },
+      {},
       {
         get: (target, prop, receiver) => {
           if (typeof prop !== "string") return Reflect.get(target, prop, receiver);
@@ -1321,6 +1665,12 @@ export class Dacument<S extends SchemaDefinition> {
   }
 
   private queueLocalOp(payload: OpPayload, role: Role): void {
+    if (payload.kind === "ack") {
+      const header = { alg: "none", typ: TOKEN_TYP } as const;
+      const token = encodeToken(header, payload);
+      this.emitEvent("change", { type: "change", ops: [{ token }] });
+      return;
+    }
     if (!roleNeedsKey(role))
       throw new Error(`Dacument: role '${role}' cannot sign ops`);
     if (!this.roleKey) throw new Error("Dacument: missing role private key");
@@ -1339,7 +1689,7 @@ export class Dacument<S extends SchemaDefinition> {
     promise.finally(() => this.pending.delete(promise));
   }
 
-  private applyRemotePayload(payload: OpPayload, signerRole: Role): boolean {
+  private applyRemotePayload(payload: OpPayload, signerRole: Role | null): boolean {
     this.clock.observe(payload.stamp);
 
     if (payload.kind === "ack") {
@@ -1347,6 +1697,8 @@ export class Dacument<S extends SchemaDefinition> {
       this.ackByActor.set(payload.iss, payload.patch.seen);
       return true;
     }
+
+    if (!signerRole) return false;
 
     if (payload.kind === "acl.set") {
       return this.applyAclPayload(payload, signerRole);
@@ -1437,6 +1789,10 @@ export class Dacument<S extends SchemaDefinition> {
         }>;
         const afterIndex = indexMapForNodes(afterNodes);
         const beforeLength = beforeNodes.filter((node) => !node.deleted).length;
+        for (const node of changed) {
+          if (node.deleted)
+            this.recordDeletedNode(payload.field as string, node.id, payload.stamp);
+        }
         this.emitListOps(
           payload.iss,
           payload.field as string,
@@ -1449,11 +1805,29 @@ export class Dacument<S extends SchemaDefinition> {
         return true;
       }
       case "set":
-        return this.applySetNodes(nodes, state, payload.field as string, payload.iss);
+        return this.applySetNodes(
+          nodes,
+          state,
+          payload.field as string,
+          payload.iss,
+          payload.stamp
+        );
       case "map":
-        return this.applyMapNodes(nodes, state, payload.field as string, payload.iss);
+        return this.applyMapNodes(
+          nodes,
+          state,
+          payload.field as string,
+          payload.iss,
+          payload.stamp
+        );
       case "record":
-        return this.applyRecordNodes(nodes, state, payload.field as string, payload.iss);
+        return this.applyRecordNodes(
+          nodes,
+          state,
+          payload.field as string,
+          payload.iss,
+          payload.stamp
+        );
       default:
         return false;
     }
@@ -1463,7 +1837,8 @@ export class Dacument<S extends SchemaDefinition> {
     nodes: unknown[],
     state: FieldState,
     field: string,
-    actor: string
+    actor: string,
+    stamp: AclAssignment["stamp"]
   ): boolean {
     const crdt = state.crdt as CRSet<any>;
     for (const node of nodes) {
@@ -1481,6 +1856,12 @@ export class Dacument<S extends SchemaDefinition> {
     const before = [...crdt.values()];
     const accepted = crdt.merge(nodes as any);
     if (accepted.length === 0) return true;
+    for (const node of accepted) {
+      if (node.op !== "rem") continue;
+      this.recordDeleteNodeStamp(field, node.id, stamp);
+      for (const targetTag of node.targets)
+        this.recordTombstone(field, targetTag, stamp);
+    }
     const after = [...crdt.values()];
     const { added, removed } = this.diffSet(before, after);
     for (const value of added)
@@ -1494,7 +1875,8 @@ export class Dacument<S extends SchemaDefinition> {
     nodes: unknown[],
     state: FieldState,
     field: string,
-    actor: string
+    actor: string,
+    stamp: AclAssignment["stamp"]
   ): boolean {
     const crdt = state.crdt as CRMap<any, any>;
     for (const node of nodes) {
@@ -1513,6 +1895,12 @@ export class Dacument<S extends SchemaDefinition> {
     const before = this.mapValue(crdt);
     const accepted = crdt.merge(nodes as any);
     if (accepted.length === 0) return true;
+    for (const node of accepted) {
+      if (node.op !== "del") continue;
+      this.recordDeleteNodeStamp(field, node.id, stamp);
+      for (const targetTag of node.targets)
+        this.recordTombstone(field, targetTag, stamp);
+    }
     const after = this.mapValue(crdt);
     const { set, removed } = this.diffMap(before, after);
     for (const entry of set)
@@ -1526,7 +1914,8 @@ export class Dacument<S extends SchemaDefinition> {
     nodes: unknown[],
     state: FieldState,
     field: string,
-    actor: string
+    actor: string,
+    stamp: AclAssignment["stamp"]
   ): boolean {
     const crdt = state.crdt as CRRecord<any>;
     for (const node of nodes) {
@@ -1544,6 +1933,12 @@ export class Dacument<S extends SchemaDefinition> {
     const before = this.recordValue(crdt);
     const accepted = crdt.merge(nodes as any);
     if (accepted.length === 0) return true;
+    for (const node of accepted) {
+      if (node.op !== "del") continue;
+      this.recordDeleteNodeStamp(field, node.id, stamp);
+      for (const targetTag of node.targets)
+        this.recordTombstone(field, targetTag, stamp);
+    }
     const after = this.recordValue(crdt);
     const { set, removed } = this.diffRecord(before, after);
     for (const [key, value] of Object.entries(set))
@@ -1692,6 +2087,159 @@ export class Dacument<S extends SchemaDefinition> {
     return { set, removed };
   }
 
+  private emitInvalidationDiffs(
+    beforeValues: Map<string, unknown>,
+    actor: string
+  ): void {
+    for (const [field, state] of this.fields.entries()) {
+      const before = beforeValues.get(field);
+      const after = this.fieldValue(field);
+      this.emitFieldDiff(actor, field, state.schema, before, after);
+    }
+  }
+
+  private emitFieldDiff(
+    actor: string,
+    field: string,
+    schema: FieldSchema,
+    before: unknown,
+    after: unknown
+  ): void {
+    switch (schema.crdt) {
+      case "register":
+        if (!Object.is(before, after))
+          this.emitMerge(actor, field, "set", { value: after });
+        return;
+      case "text": {
+        const beforeText = typeof before === "string" ? before : "";
+        const afterText = typeof after === "string" ? after : "";
+        if (beforeText === afterText) return;
+        this.emitTextDiff(actor, field, beforeText, afterText);
+        return;
+      }
+      case "array": {
+        const beforeArr = Array.isArray(before) ? before : [];
+        const afterArr = Array.isArray(after) ? after : [];
+        if (this.arrayEquals(beforeArr, afterArr)) return;
+        this.emitArrayDiff(actor, field, beforeArr, afterArr);
+        return;
+      }
+      case "set": {
+        const beforeArr = Array.isArray(before) ? before : [];
+        const afterArr = Array.isArray(after) ? after : [];
+        const { added, removed } = this.diffSet(beforeArr, afterArr);
+        for (const value of added)
+          this.emitMerge(actor, field, "add", { value });
+        for (const value of removed)
+          this.emitMerge(actor, field, "delete", { value });
+        return;
+      }
+      case "map": {
+        const beforeArr = Array.isArray(before) ? before : [];
+        const afterArr = Array.isArray(after) ? after : [];
+        const { set, removed } = this.diffMap(
+          beforeArr as Array<[JsValue, unknown]>,
+          afterArr as Array<[JsValue, unknown]>
+        );
+        for (const entry of set)
+          this.emitMerge(actor, field, "set", entry);
+        for (const key of removed)
+          this.emitMerge(actor, field, "delete", { key });
+        return;
+      }
+      case "record": {
+        const beforeRec =
+          before && isObject(before) && !Array.isArray(before) ? before : {};
+        const afterRec =
+          after && isObject(after) && !Array.isArray(after) ? after : {};
+        const { set, removed } = this.diffRecord(
+          beforeRec as Record<string, unknown>,
+          afterRec as Record<string, unknown>
+        );
+        for (const [key, value] of Object.entries(set))
+          this.emitMerge(actor, field, "set", { key, value });
+        for (const key of removed)
+          this.emitMerge(actor, field, "delete", { key });
+      }
+    }
+  }
+
+  private emitTextDiff(
+    actor: string,
+    field: string,
+    before: string,
+    after: string
+  ): void {
+    const beforeChars = [...before];
+    const afterChars = [...after];
+    const prefix = this.commonPrefix(beforeChars, afterChars);
+    const suffix = this.commonSuffix(beforeChars, afterChars, prefix);
+    const beforeEnd = beforeChars.length - suffix;
+    const afterEnd = afterChars.length - suffix;
+
+    for (let index = beforeEnd - 1; index >= prefix; index--) {
+      this.emitMerge(actor, field, "deleteAt", { index });
+    }
+    for (let index = prefix; index < afterEnd; index++) {
+      this.emitMerge(actor, field, "insertAt", {
+        index,
+        value: afterChars[index],
+      });
+    }
+  }
+
+  private emitArrayDiff(
+    actor: string,
+    field: string,
+    before: unknown[],
+    after: unknown[]
+  ): void {
+    const prefix = this.commonPrefix(before, after);
+    const suffix = this.commonSuffix(before, after, prefix);
+    const beforeEnd = before.length - suffix;
+    const afterEnd = after.length - suffix;
+
+    for (let index = beforeEnd - 1; index >= prefix; index--) {
+      this.emitMerge(actor, field, "deleteAt", { index });
+    }
+    for (let index = prefix; index < afterEnd; index++) {
+      this.emitMerge(actor, field, "insertAt", {
+        index,
+        value: after[index],
+      });
+    }
+  }
+
+  private arrayEquals(left: unknown[], right: unknown[]): boolean {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index++) {
+      if (!Object.is(left[index], right[index])) return false;
+    }
+    return true;
+  }
+
+  private commonPrefix<T>(left: T[], right: T[]): number {
+    const max = Math.min(left.length, right.length);
+    let index = 0;
+    while (index < max && Object.is(left[index], right[index])) index++;
+    return index;
+  }
+
+  private commonSuffix<T>(left: T[], right: T[], prefix: number): number {
+    const max = Math.min(left.length, right.length) - prefix;
+    let count = 0;
+    while (
+      count < max &&
+      Object.is(
+        left[left.length - 1 - count],
+        right[right.length - 1 - count]
+      )
+    ) {
+      count++;
+    }
+    return count;
+  }
+
   private setRole(actorId: string, role: Role): void {
     const stamp = this.clock.next();
     const signerRole = this.aclLog.roleAt(this.actorId, stamp);
@@ -1769,17 +2317,22 @@ export class Dacument<S extends SchemaDefinition> {
     method: string,
     data: unknown
   ): void {
+    if (this.suppressMerge) return;
     if (this.isRevoked()) return;
     this.emitEvent("merge", { type: "merge", actor, target, method, data });
   }
 
-  private emitRevoked(previous: Role, payload: OpPayload): void {
+  private emitRevoked(
+    previous: Role,
+    by: string,
+    stamp: AclAssignment["stamp"]
+  ): void {
     this.emitEvent("revoked", {
       type: "revoked",
       actorId: this.actorId,
       previous,
-      by: payload.iss,
-      stamp: payload.stamp,
+      by,
+      stamp,
     });
   }
 
@@ -1838,21 +2391,6 @@ export class Dacument<S extends SchemaDefinition> {
     if (typeof payload.kind !== "string") return false;
     if (typeof payload.schema !== "string") return false;
     return true;
-  }
-
-  private resolveSignerRole(payload: OpPayload): Role | null {
-    const role = this.aclLog.roleAt(payload.iss, payload.stamp);
-    if (roleNeedsKey(role)) return role;
-    if (
-      this.aclLog.isEmpty() &&
-      payload.kind === "acl.set" &&
-      isAclPatch(payload.patch) &&
-      payload.patch.role === "owner" &&
-      payload.patch.target === payload.iss
-    ) {
-      return "owner";
-    }
-    return null;
   }
 
   private assertSchemaKeys(): void {

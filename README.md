@@ -8,13 +8,21 @@ register fields and safe CRDT views for all other field types.
 ## Install
 
 ```sh
-npm install dacument
+npm install zeyra
+# or
+pnpm add zeyra
+# or
+yarn add zeyra
 ```
 
 ## Quick start
 
 ```ts
+import { generateNonce } from "bytecodec";
 import { Dacument } from "dacument";
+
+const actorId = generateNonce(); // 256-bit base64url id
+Dacument.setActorId(actorId);
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/i }),
@@ -24,12 +32,10 @@ const schema = Dacument.schema({
   meta: Dacument.record({ jsType: "string" }),
 });
 
-const ownerId = "user-123"; // your app's authenticated user id
-const { docId, snapshot, roleKeys } = await Dacument.create({ schema, ownerId });
+const { docId, snapshot, roleKeys } = await Dacument.create({ schema });
 
 const doc = await Dacument.load({
   schema,
-  actorId: ownerId,
   roleKey: roleKeys.owner.privateKey,
   snapshot,
 });
@@ -81,11 +87,15 @@ Roles are evaluated at the op stamp time (HLC).
 Grant roles via `doc.acl` (viewer/revoked have no key):
 
 ```ts
-const bobId = "user-bob";
+const bobId = generateNonce();
 doc.acl.setRole(bobId, "editor");
 doc.acl.setRole("user-viewer", "viewer");
 await doc.flush();
 ```
+
+Before any schema/load/create, call `Dacument.setActorId()` once per process.
+The actor id must be a 256-bit base64url string (e.g. `bytecodec.generateNonce()`).
+Subsequent calls are ignored.
 
 Each actor signs with the role key they were given (owner/manager/editor). Load
 with the highest role key you have; viewers load without a key.
@@ -113,9 +123,9 @@ without snapshotting.
 To add a new replica, share a snapshot and load it:
 
 ```ts
+Dacument.setActorId(bobId);
 const bob = await Dacument.load({
   schema,
-  actorId: bobId,
   roleKey: bobKey.privateKey,
   snapshot,
 });
@@ -125,7 +135,7 @@ Snapshots do not include schema or schema ids; callers must supply the schema on
 
 ## Events and values
 
-- `doc.addEventListener("change", handler)` emits signed ops for network sync.
+- `doc.addEventListener("change", handler)` emits ops for network sync (writer ops are signed; acks are unsigned).
 - `doc.addEventListener("merge", handler)` emits `{ actor, target, method, data }`.
 - `doc.addEventListener("error", handler)` emits signing/verification errors.
 - `doc.addEventListener("revoked", handler)` fires when the current actor is revoked.
@@ -133,13 +143,23 @@ Snapshots do not include schema or schema ids; callers must supply the schema on
 - `doc.snapshot()` returns a loadable op log (`{ docId, roleKeys, ops }`).
 - Revoked actors cannot snapshot; reads are masked to initial values.
 
+## Garbage collection
+
+Dacument tracks per-actor `ack` ops and compacts tombstones once all non-revoked
+actors (including viewers) have acknowledged a given HLC. Acks are emitted
+automatically after merges that apply new non-ack ops. Acks are unsigned
+(`alg: "none"`); signed acks are rejected.
+If any non-revoked actor is offline and never acks, tombstones are kept.
+
 ## Guarantees
 
 - Schema enforcement is strict; unknown fields are rejected.
-- Ops are accepted only if the CRDT patch is valid and the signature verifies.
+- Ops are accepted only if the CRDT patch is valid and the signature verifies
+  (acks are unsigned and signed acks are rejected).
 - Role checks are applied at the op stamp time (HLC).
-- IDs are base64url nonces from `bytecodec.generateNonce()` (32 random bytes).
+- IDs are base64url nonces from `bytecodec` librarys `generateNonce()` (32 random bytes).
 - Private keys are returned by `create()` and never stored by Dacument.
+- Snapshots may include ops that are rejected; invalid ops are ignored on load.
 
 Eventual consistency is achieved when all signed ops are delivered to all
 replicas. Dacument does not provide transport; use `change` events to wire it up.
@@ -153,8 +173,17 @@ replicas. Dacument does not provide transport; use `change` events to wire it up
 
 - `npm test` runs the test suite (build included).
 - `npm run bench` runs all CRDT micro-benchmarks (build included).
-- `npm run sim:dacument` runs a worker-thread stress simulation.
+- `npm run sim` runs a worker-thread stress simulation.
 - `npm run verify` runs tests, benchmarks, and the simulation in one go.
+
+## Benchmarks
+
+`npm run bench` prints CRDT timings alongside native structure baselines
+(Array/Set/Map/string). Use environment variables like `RUNS`, `SIZE`, `READS`,
+`WRITES`, and `MERGE_SIZE` to tune scale. Compare the CRDT lines to the native
+lines in the output to estimate overhead on your machine. CRDT ops retain
+causal metadata and tombstones, so write-heavy paths will be slower than native
+structures; the baselines show the relative cost.
 
 ## Advanced exports
 

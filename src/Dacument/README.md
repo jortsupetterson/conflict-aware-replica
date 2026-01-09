@@ -7,7 +7,11 @@ for register fields and CRDT views for all other field types.
 ## Schema
 
 ```ts
+import { generateNonce } from "bytecodec";
 import { Dacument } from "dacument";
+
+const actorId = generateNonce(); // 256-bit base64url id
+Dacument.setActorId(actorId);
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/i }),
@@ -21,12 +25,10 @@ const schema = Dacument.schema({
 ## Create and load
 
 ```ts
-const ownerId = "user-123"; // your app's authenticated user id
-const { docId, snapshot, roleKeys } = await Dacument.create({ schema, ownerId });
+const { docId, snapshot, roleKeys } = await Dacument.create({ schema });
 
 const doc = await Dacument.load({
   schema,
-  actorId: ownerId,
   roleKey: roleKeys.owner.privateKey,
   snapshot,
 });
@@ -35,6 +37,8 @@ const doc = await Dacument.load({
 `create()` generates a `docId` and role keys, and returns a snapshot. Load the
 document with the highest role key you have (viewers load without a key).
 Snapshots do not include schema or schema ids; the caller must provide the schema.
+Call `Dacument.setActorId()` once per process before creating schemas or loading.
+Subsequent calls are ignored.
 
 `roleKeys` includes owner/manager/editor key pairs; store and distribute them
 as needed.
@@ -42,7 +46,7 @@ as needed.
 ## ACL
 
 ```ts
-const bobId = "user-bob";
+const bobId = generateNonce();
 doc.acl.setRole(bobId, "editor");
 doc.acl.setRole("user-viewer", "viewer");
 await doc.flush();
@@ -55,12 +59,17 @@ Revoked actors cannot call `snapshot()`.
 
 ## Events
 
-- `doc.addEventListener("change", handler)` emits signed ops for network sync.
+- `doc.addEventListener("change", handler)` emits ops for network sync (writer ops are signed; acks are unsigned).
 - `doc.addEventListener("merge", handler)` emits `{ actor, target, method, data }`.
 - `doc.addEventListener("error", handler)` emits signing/verification errors.
 - `doc.addEventListener("revoked", handler)` fires when the current actor is revoked.
 - `doc.snapshot()` returns a loadable op log (`{ docId, roleKeys, ops }`).
 
 Map keys must be JSON-compatible values. For string-keyed data, prefer `record`.
+
+Snapshots may include ops that are rejected on load; invalid ops are ignored.
+Tombstones are compacted once all non-revoked actors have acknowledged a given HLC
+via `ack` ops (emitted automatically after merges). Acks use `alg: "none"` and
+signed acks are rejected.
 
 See `README.md` for full usage and guarantees.

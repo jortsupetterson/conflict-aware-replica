@@ -6,10 +6,11 @@ export declare class AclLog {
     private readonly currentByActor;
     merge(input: AclAssignment[] | AclAssignment): AclAssignment[];
     snapshot(): AclAssignment[];
+    reset(): void;
     isEmpty(): boolean;
     roleAt(actorId: string, stamp: AclAssignment["stamp"]): Role;
-    entryAt(actorId: string, stamp: AclAssignment["stamp"]): AclAssignment | null;
     currentRole(actorId: string): Role;
+    currentEntry(actorId: string): AclAssignment | null;
     knownActors(): string[];
     private insert;
 }

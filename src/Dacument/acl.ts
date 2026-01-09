@@ -33,6 +33,13 @@ export class AclLog {
     return this.nodes.slice();
   }
 
+  reset(): void {
+    this.nodes.length = 0;
+    this.nodesById.clear();
+    this.nodesByActor.clear();
+    this.currentByActor.clear();
+  }
+
   isEmpty(): boolean {
     return this.nodes.length === 0;
   }
@@ -49,21 +56,13 @@ export class AclLog {
     return "revoked";
   }
 
-  entryAt(actorId: string, stamp: AclAssignment["stamp"]): AclAssignment | null {
-    const list = this.nodesByActor.get(actorId);
-    if (!list || list.length === 0) return null;
-
-    for (let index = list.length - 1; index >= 0; index--) {
-      const entry = list[index];
-      if (compareHLC(entry.stamp, stamp) <= 0) return entry;
-    }
-
-    return null;
-  }
-
   currentRole(actorId: string): Role {
     const entry = this.currentByActor.get(actorId);
     return entry ? entry.role : "revoked";
+  }
+
+  currentEntry(actorId: string): AclAssignment | null {
+    return this.currentByActor.get(actorId) ?? null;
   }
 
   knownActors(): string[] {

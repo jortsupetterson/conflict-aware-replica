@@ -9,7 +9,7 @@ import { CRSet } from "../CRSet/class.js";
 import { CRText } from "../CRText/class.js";
 import { AclLog } from "./acl.js";
 import { HLC, compareHLC } from "./clock.js";
-import { decodeToken, signToken, verifyToken } from "./crypto.js";
+import { decodeToken, encodeToken, signToken, verifyToken } from "./crypto.js";
 import { array, map, record, register, set, text, isJsValue, isValueOfType, schemaIdInput, } from "./types.js";
 const TOKEN_TYP = "DACOP";
 function nowSeconds() {
@@ -99,6 +99,16 @@ function createEmptyField(crdt) {
 function roleNeedsKey(role) {
     return role === "owner" || role === "manager" || role === "editor";
 }
+function parseSignerRole(kid, issuer) {
+    if (!kid)
+        return null;
+    const [kidIssuer, role] = kid.split(":");
+    if (kidIssuer !== issuer)
+        return null;
+    if (role === "owner" || role === "manager" || role === "editor")
+        return role;
+    return null;
+}
 async function generateRoleKeys() {
     const ownerPair = await generateSignPair();
     const managerPair = await generateSignPair();
@@ -117,16 +127,40 @@ function toPublicRoleKeys(roleKeys) {
     };
 }
 export class Dacument {
-    static schema = (schema) => schema;
+    static actorId;
+    static setActorId(actorId) {
+        if (Dacument.actorId)
+            return;
+        if (!Dacument.isValidActorId(actorId))
+            throw new Error("Dacument.setActorId: actorId must be 256-bit base64url");
+        Dacument.actorId = actorId;
+    }
+    static requireActorId() {
+        if (!Dacument.actorId)
+            throw new Error("Dacument: actorId not set; call Dacument.setActorId()");
+        return Dacument.actorId;
+    }
+    static isValidActorId(actorId) {
+        if (typeof actorId !== "string")
+            return false;
+        try {
+            const bytes = Bytes.fromBase64UrlString(actorId);
+            return bytes.byteLength === 32 && actorId.length === 43;
+        }
+        catch {
+            return false;
+        }
+    }
+    static schema = (schema) => {
+        Dacument.requireActorId();
+        return schema;
+    };
     static register = register;
     static text = text;
     static array = array;
     static set = set;
     static map = map;
     static record = record;
-    static generateId() {
-        return generateNonce();
-    }
     static async computeSchemaId(schema) {
         const normalized = schemaIdInput(schema);
         const sortedKeys = Object.keys(normalized).sort();
@@ -139,17 +173,16 @@ export class Dacument {
         return Bytes.toBase64UrlString(new Uint8Array(digest));
     }
     static async create(params) {
-        if (!params.ownerId)
-            throw new Error("Dacument.create: ownerId is required");
-        const docId = params.docId ?? Dacument.generateId();
+        const ownerId = Dacument.requireActorId();
+        const docId = params.docId ?? generateNonce();
         const schemaId = await Dacument.computeSchemaId(params.schema);
         const roleKeys = await generateRoleKeys();
         const publicKeys = toPublicRoleKeys(roleKeys);
-        const clock = new HLC(params.ownerId);
+        const clock = new HLC(ownerId);
         const header = {
             alg: "ES256",
             typ: TOKEN_TYP,
-            kid: `${params.ownerId}:owner`,
+            kid: `${ownerId}:owner`,
         };
         const ops = [];
         const capturePatches = (subscribe, mutate) => {
@@ -168,7 +201,7 @@ export class Dacument {
             ops.push({ token });
         };
         await sign({
-            iss: params.ownerId,
+            iss: ownerId,
             sub: docId,
             iat: nowSeconds(),
             stamp: clock.next(),
@@ -176,7 +209,7 @@ export class Dacument {
             schema: schemaId,
             patch: {
                 id: uuidv7(),
-                target: params.ownerId,
+                target: ownerId,
                 role: "owner",
             },
         });
@@ -191,7 +224,7 @@ export class Dacument {
                     !schema.regex.test(schema.initial))
                     throw new Error(`Dacument.create: '${field}' failed regex`);
                 await sign({
-                    iss: params.ownerId,
+                    iss: ownerId,
                     sub: docId,
                     iat: nowSeconds(),
                     stamp: clock.next(),
@@ -215,7 +248,7 @@ export class Dacument {
                 });
                 if (nodes.length)
                     await sign({
-                        iss: params.ownerId,
+                        iss: ownerId,
                         sub: docId,
                         iat: nowSeconds(),
                         stamp: clock.next(),
@@ -242,7 +275,7 @@ export class Dacument {
                 });
                 if (nodes.length)
                     await sign({
-                        iss: params.ownerId,
+                        iss: ownerId,
                         sub: docId,
                         iat: nowSeconds(),
                         stamp: clock.next(),
@@ -272,7 +305,7 @@ export class Dacument {
                 });
                 if (nodes.length)
                     await sign({
-                        iss: params.ownerId,
+                        iss: ownerId,
                         sub: docId,
                         iat: nowSeconds(),
                         stamp: clock.next(),
@@ -307,7 +340,7 @@ export class Dacument {
                 });
                 if (nodes.length)
                     await sign({
-                        iss: params.ownerId,
+                        iss: ownerId,
                         sub: docId,
                         iat: nowSeconds(),
                         stamp: clock.next(),
@@ -337,7 +370,7 @@ export class Dacument {
                 });
                 if (nodes.length)
                     await sign({
-                        iss: params.ownerId,
+                        iss: ownerId,
                         sub: docId,
                         iat: nowSeconds(),
                         stamp: clock.next(),
@@ -357,18 +390,16 @@ export class Dacument {
         return { docId, schemaId, roleKeys, snapshot };
     }
     static async load(params) {
+        const actorId = Dacument.requireActorId();
         const schemaId = await Dacument.computeSchemaId(params.schema);
         const doc = new Dacument({
             schema: params.schema,
             schemaId,
             docId: params.snapshot.docId,
-            actorId: params.actorId,
             roleKey: params.roleKey,
             roleKeys: params.snapshot.roleKeys,
         });
-        const result = await doc.merge(params.snapshot.ops);
-        if (result.rejected)
-            throw new Error("Dacument.load: snapshot contains invalid ops");
+        await doc.merge(params.snapshot.ops);
         return doc;
     }
     docId;
@@ -382,17 +413,32 @@ export class Dacument {
     roleKeys;
     opLog = [];
     opTokens = new Set();
+    verifiedOps = new Map();
+    appliedTokens = new Set();
     currentRole;
     revokedCrdtByField = new Map();
+    deleteStampsByField = new Map();
+    tombstoneStampsByField = new Map();
+    deleteNodeStampsByField = new Map();
     eventListeners = new Map();
     pending = new Set();
     ackByActor = new Map();
+    suppressMerge = false;
+    ackScheduled = false;
+    lastGcBarrier = null;
+    snapshotFieldValues() {
+        const values = new Map();
+        for (const key of this.fields.keys())
+            values.set(key, this.fieldValue(key));
+        return values;
+    }
     acl;
     constructor(params) {
+        const actorId = Dacument.requireActorId();
         this.schema = params.schema;
         this.schemaId = params.schemaId;
         this.docId = params.docId;
-        this.actorId = params.actorId;
+        this.actorId = actorId;
         this.roleKey = params.roleKey;
         this.roleKeys = params.roleKeys;
         this.clock = new HLC(this.actorId);
@@ -470,34 +516,6 @@ export class Dacument {
         if (listeners.size === 0)
             this.eventListeners.delete(type);
     }
-    onChange(listener) {
-        const handler = (event) => listener(event.ops);
-        this.addEventListener("change", handler);
-        return () => this.removeEventListener("change", handler);
-    }
-    onFieldChange(field, listener) {
-        const handler = (event) => {
-            if (event.target === field)
-                listener(this.fieldValue(field));
-        };
-        this.addEventListener("merge", handler);
-        return () => this.removeEventListener("merge", handler);
-    }
-    onAnyFieldChange(listener) {
-        const handler = (event) => listener(event.target, this.fieldValue(event.target));
-        this.addEventListener("merge", handler);
-        return () => this.removeEventListener("merge", handler);
-    }
-    onError(listener) {
-        const handler = (event) => listener(event.error);
-        this.addEventListener("error", handler);
-        return () => this.removeEventListener("error", handler);
-    }
-    onRevoked(listener) {
-        const handler = (event) => listener(event);
-        this.addEventListener("revoked", handler);
-        return () => this.removeEventListener("revoked", handler);
-    }
     async flush() {
         await Promise.all([...this.pending]);
     }
@@ -515,6 +533,9 @@ export class Dacument {
         const decodedOps = [];
         const accepted = [];
         let rejected = 0;
+        let sawNewToken = false;
+        let diffActor = null;
+        let diffStamp = null;
         for (const item of tokens) {
             const token = typeof item === "string" ? item : item.token;
             const decoded = decodeToken(token);
@@ -531,9 +552,102 @@ export class Dacument {
                 rejected++;
                 continue;
             }
-            decodedOps.push({ token, payload });
+            const isUnsignedAck = decoded.header.alg === "none" &&
+                payload.kind === "ack" &&
+                decoded.header.typ === TOKEN_TYP;
+            if (decoded.header.alg === "none" && !isUnsignedAck) {
+                rejected++;
+                continue;
+            }
+            if (payload.kind === "ack" && decoded.header.alg !== "none") {
+                rejected++;
+                continue;
+            }
+            let stored = this.verifiedOps.get(token);
+            if (!stored) {
+                if (isUnsignedAck) {
+                    stored = { payload, signerRole: null };
+                }
+                else {
+                    const signerRole = parseSignerRole(decoded.header.kid, payload.iss);
+                    if (!signerRole) {
+                        rejected++;
+                        continue;
+                    }
+                    const publicKey = this.roleKeys[signerRole];
+                    const verified = await verifyToken(publicKey, token, TOKEN_TYP);
+                    if (!verified) {
+                        rejected++;
+                        continue;
+                    }
+                    stored = { payload, signerRole };
+                }
+                this.verifiedOps.set(token, stored);
+                if (!this.opTokens.has(token)) {
+                    this.opTokens.add(token);
+                    this.opLog.push({ token });
+                }
+                sawNewToken = true;
+                if (payload.kind === "acl.set") {
+                    if (!diffStamp || compareHLC(payload.stamp, diffStamp) > 0) {
+                        diffStamp = payload.stamp;
+                        diffActor = payload.iss;
+                    }
+                }
+            }
+            decodedOps.push({
+                token,
+                payload: stored.payload,
+                signerRole: stored.signerRole,
+            });
         }
-        decodedOps.sort((left, right) => {
+        const prevRole = this.currentRole;
+        let appliedNonAck = false;
+        if (sawNewToken) {
+            const beforeValues = this.isRevoked() ? undefined : this.snapshotFieldValues();
+            const result = this.rebuildFromVerified(new Set(this.appliedTokens), {
+                beforeValues,
+                diffActor: diffActor ?? this.actorId,
+            });
+            appliedNonAck = result.appliedNonAck;
+        }
+        for (const { token } of decodedOps) {
+            if (this.appliedTokens.has(token)) {
+                accepted.push({ token });
+            }
+            else {
+                rejected++;
+            }
+        }
+        const nextRole = this.currentRole;
+        if (nextRole !== prevRole && nextRole === "revoked") {
+            const entry = this.aclLog.currentEntry(this.actorId);
+            this.emitRevoked(prevRole, entry?.by ?? this.actorId, entry?.stamp ?? this.clock.current);
+        }
+        if (appliedNonAck)
+            this.scheduleAck();
+        this.maybeGc();
+        return { accepted, rejected };
+    }
+    rebuildFromVerified(previousApplied, options) {
+        const invalidated = new Set(previousApplied);
+        let appliedNonAck = false;
+        this.aclLog.reset();
+        this.ackByActor.clear();
+        this.appliedTokens.clear();
+        this.deleteStampsByField.clear();
+        this.tombstoneStampsByField.clear();
+        this.deleteNodeStampsByField.clear();
+        this.revokedCrdtByField.clear();
+        for (const state of this.fields.values()) {
+            state.crdt = createEmptyField(state.schema);
+        }
+        const ops = [...this.verifiedOps.entries()].map(([token, data]) => ({
+            token,
+            payload: data.payload,
+            signerRole: data.signerRole,
+        }));
+        ops.sort((left, right) => {
             const cmp = compareHLC(left.payload.stamp, right.payload.stamp);
             if (cmp !== 0)
                 return cmp;
@@ -541,45 +655,71 @@ export class Dacument {
                 return 0;
             return left.token < right.token ? -1 : 1;
         });
-        for (const { token, payload } of decodedOps) {
-            const prevRole = this.currentRole;
-            const signerRole = this.resolveSignerRole(payload);
-            if (!signerRole || !roleNeedsKey(signerRole)) {
-                rejected++;
+        for (const { token, payload, signerRole } of ops) {
+            let allowed = false;
+            if (payload.kind === "acl.set") {
+                if (!signerRole)
+                    continue;
+                if (this.aclLog.isEmpty() &&
+                    isAclPatch(payload.patch) &&
+                    payload.patch.role === "owner" &&
+                    payload.patch.target === payload.iss &&
+                    signerRole === "owner") {
+                    allowed = true;
+                }
+                else {
+                    const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
+                    if (roleAt === signerRole &&
+                        isAclPatch(payload.patch) &&
+                        this.canWriteAcl(signerRole, payload.patch.role))
+                        allowed = true;
+                }
+            }
+            else {
+                const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
+                if (payload.kind === "ack") {
+                    if (roleAt === "revoked")
+                        continue;
+                    if (signerRole !== null)
+                        continue;
+                    allowed = true;
+                }
+                else if (signerRole && roleAt === signerRole) {
+                    if (this.canWriteField(signerRole))
+                        allowed = true;
+                }
+            }
+            if (!allowed)
                 continue;
+            const emit = !previousApplied.has(token);
+            this.suppressMerge = !emit;
+            try {
+                const applied = this.applyRemotePayload(payload, signerRole);
+                if (!applied)
+                    continue;
             }
-            const publicKey = this.roleKeys[signerRole];
-            const verified = await verifyToken(publicKey, token, TOKEN_TYP);
-            if (!verified) {
-                rejected++;
-                continue;
+            finally {
+                this.suppressMerge = false;
             }
-            if (payload.kind !== "acl.set" && !this.canWriteField(signerRole)) {
-                rejected++;
-                continue;
-            }
-            const applied = this.applyRemotePayload(payload, signerRole);
-            if (!applied) {
-                rejected++;
-                continue;
-            }
-            const nextRole = this.aclLog.currentRole(this.actorId);
-            if (nextRole !== prevRole) {
-                this.currentRole = nextRole;
-                if (nextRole === "revoked")
-                    this.emitRevoked(prevRole, payload);
-            }
-            if (!this.opTokens.has(token)) {
-                this.opTokens.add(token);
-                this.opLog.push({ token });
-            }
-            accepted.push({ token });
+            this.appliedTokens.add(token);
+            invalidated.delete(token);
+            if (emit && payload.kind !== "ack")
+                appliedNonAck = true;
         }
-        return { accepted, rejected };
+        this.currentRole = this.aclLog.currentRole(this.actorId);
+        if (invalidated.size > 0 &&
+            options?.beforeValues &&
+            options.diffActor &&
+            !this.isRevoked()) {
+            this.emitInvalidationDiffs(options.beforeValues, options.diffActor);
+        }
+        return { appliedNonAck };
     }
     ack() {
         const stamp = this.clock.next();
         const role = this.aclLog.roleAt(this.actorId, stamp);
+        if (role === "revoked")
+            throw new Error("Dacument: revoked actors cannot acknowledge");
         const seen = this.clock.current;
         this.ackByActor.set(this.actorId, seen);
         this.queueLocalOp({
@@ -591,6 +731,154 @@ export class Dacument {
             schema: this.schemaId,
             patch: { seen },
         }, role);
+    }
+    scheduleAck() {
+        if (this.ackScheduled)
+            return;
+        if (this.currentRole === "revoked")
+            return;
+        this.ackScheduled = true;
+        queueMicrotask(() => {
+            this.ackScheduled = false;
+            try {
+                this.ack();
+            }
+            catch (error) {
+                this.emitError(error instanceof Error ? error : new Error(String(error)));
+            }
+        });
+    }
+    computeGcBarrier() {
+        const actors = this.aclLog
+            .knownActors()
+            .filter((actorId) => this.aclLog.currentRole(actorId) !== "revoked");
+        if (actors.length === 0)
+            return null;
+        let barrier = null;
+        for (const actorId of actors) {
+            const seen = this.ackByActor.get(actorId);
+            if (!seen)
+                return null;
+            if (!barrier || compareHLC(seen, barrier) < 0)
+                barrier = seen;
+        }
+        return barrier;
+    }
+    maybeGc() {
+        const barrier = this.computeGcBarrier();
+        if (!barrier)
+            return;
+        if (this.lastGcBarrier && compareHLC(barrier, this.lastGcBarrier) <= 0)
+            return;
+        this.lastGcBarrier = barrier;
+        this.compactFields(barrier);
+    }
+    compactFields(barrier) {
+        for (const [field, state] of this.fields.entries()) {
+            if (state.schema.crdt === "text" || state.schema.crdt === "array") {
+                this.compactListField(field, state, barrier);
+                continue;
+            }
+            if (state.schema.crdt === "set" ||
+                state.schema.crdt === "map" ||
+                state.schema.crdt === "record") {
+                this.compactTombstoneField(field, state, barrier);
+            }
+        }
+    }
+    compactListField(field, state, barrier) {
+        const deleteMap = this.deleteStampsByField.get(field);
+        if (!deleteMap || deleteMap.size === 0)
+            return;
+        const removable = new Set();
+        for (const [nodeId, stamp] of deleteMap.entries()) {
+            if (compareHLC(stamp, barrier) <= 0)
+                removable.add(nodeId);
+        }
+        if (removable.size === 0)
+            return;
+        const crdt = state.crdt;
+        const snapshot = crdt.snapshot();
+        const filtered = snapshot.filter((node) => !(node.deleted && removable.has(node.id)));
+        if (filtered.length === snapshot.length)
+            return;
+        state.crdt =
+            state.schema.crdt === "text"
+                ? new CRText(filtered)
+                : new CRArray(filtered);
+        for (const nodeId of removable)
+            deleteMap.delete(nodeId);
+    }
+    compactTombstoneField(field, state, barrier) {
+        const tombstoneMap = this.tombstoneStampsByField.get(field);
+        const deleteNodeMap = this.deleteNodeStampsByField.get(field);
+        if (!tombstoneMap || tombstoneMap.size === 0 || !deleteNodeMap)
+            return;
+        const removableTags = new Set();
+        for (const [tagId, stamp] of tombstoneMap.entries()) {
+            if (compareHLC(stamp, barrier) <= 0)
+                removableTags.add(tagId);
+        }
+        if (removableTags.size === 0)
+            return;
+        const snapshot = state.crdt.snapshot();
+        const filtered = [];
+        const remainingDeletes = new Map();
+        const remainingTombstones = new Map();
+        for (const node of snapshot) {
+            if ("op" in node && node.op === "add") {
+                if (removableTags.has(node.id))
+                    continue;
+                filtered.push(node);
+                continue;
+            }
+            if ("op" in node && node.op === "set") {
+                if (removableTags.has(node.id))
+                    continue;
+                filtered.push(node);
+                continue;
+            }
+            if ("op" in node && (node.op === "rem" || node.op === "del")) {
+                const stamp = deleteNodeMap.get(node.id);
+                const targets = node.targets;
+                const allTargetsRemovable = targets.every((target) => removableTags.has(target));
+                if (stamp &&
+                    compareHLC(stamp, barrier) <= 0 &&
+                    allTargetsRemovable) {
+                    continue;
+                }
+                filtered.push(node);
+                if (stamp) {
+                    remainingDeletes.set(node.id, stamp);
+                    for (const target of targets) {
+                        const existing = remainingTombstones.get(target);
+                        if (!existing || compareHLC(stamp, existing) < 0)
+                            remainingTombstones.set(target, stamp);
+                    }
+                }
+                continue;
+            }
+            filtered.push(node);
+        }
+        if (filtered.length === snapshot.length)
+            return;
+        if (state.schema.crdt === "set") {
+            state.crdt = new CRSet({
+                snapshot: filtered,
+                key: state.schema.key,
+            });
+        }
+        else if (state.schema.crdt === "map") {
+            state.crdt = new CRMap({
+                snapshot: filtered,
+                key: state.schema.key,
+            });
+        }
+        else {
+            state.crdt = new CRRecord(filtered);
+        }
+        this.deleteNodeStampsByField.set(field, remainingDeletes);
+        this.tombstoneStampsByField.set(field, remainingTombstones);
     }
     setRegisterValue(field, value) {
         const state = this.fields.get(field);
@@ -742,6 +1030,31 @@ export class Dacument {
         this.revokedCrdtByField.set(field, crdt);
         return crdt;
     }
+    stampMapFor(map, field) {
+        const existing = map.get(field);
+        if (existing)
+            return existing;
+        const created = new Map();
+        map.set(field, created);
+        return created;
+    }
+    setMinStamp(map, id, stamp) {
+        const existing = map.get(id);
+        if (!existing || compareHLC(stamp, existing) < 0)
+            map.set(id, stamp);
+    }
+    recordDeletedNode(field, nodeId, stamp) {
+        const map = this.stampMapFor(this.deleteStampsByField, field);
+        this.setMinStamp(map, nodeId, stamp);
+    }
+    recordTombstone(field, tagId, stamp) {
+        const map = this.stampMapFor(this.tombstoneStampsByField, field);
+        this.setMinStamp(map, tagId, stamp);
+    }
+    recordDeleteNodeStamp(field, nodeId, stamp) {
+        const map = this.stampMapFor(this.deleteNodeStampsByField, field);
+        this.setMinStamp(map, nodeId, stamp);
+    }
     createTextView(field, state) {
         const doc = this;
         const readCrdt = () => doc.readCrdt(field, state);
@@ -795,9 +1108,6 @@ export class Dacument {
                     patch: { nodes: patches },
                 }, role);
                 return result;
-            },
-            onChange(listener) {
-                return doc.onFieldChange(field, listener);
             },
             [Symbol.iterator]() {
                 return readCrdt().toString()[Symbol.iterator]();
@@ -853,9 +1163,6 @@ export class Dacument {
             indexOf(value) {
                 return readCrdt().indexOf(value);
             },
-            onChange(listener) {
-                return doc.onFieldChange(field, listener);
-            },
             [Symbol.iterator]() {
                 return readCrdt()[Symbol.iterator]();
             },
@@ -892,9 +1199,6 @@ export class Dacument {
             },
             forEach(callback, thisArg) {
                 return readCrdt().forEach(callback, thisArg);
-            },
-            onChange(listener) {
-                return doc.onFieldChange(field, listener);
             },
             [Symbol.iterator]() {
                 return readCrdt()[Symbol.iterator]();
@@ -941,9 +1245,6 @@ export class Dacument {
             forEach(callback, thisArg) {
                 return readCrdt().forEach(callback, thisArg);
             },
-            onChange(listener) {
-                return doc.onFieldChange(field, listener);
-            },
             [Symbol.iterator]() {
                 return readCrdt()[Symbol.iterator]();
             },
@@ -955,17 +1256,7 @@ export class Dacument {
     createRecordView(field, state) {
         const doc = this;
         const readCrdt = () => doc.readCrdt(field, state);
-        return new Proxy({
-            onChange(listener) {
-                return doc.onFieldChange(field, listener);
-            },
-            keys() {
-                return Object.keys(readCrdt());
-            },
-            toJSON() {
-                return doc.recordValue(readCrdt());
-            },
-        }, {
+        return new Proxy({}, {
             get: (target, prop, receiver) => {
                 if (typeof prop !== "string")
                     return Reflect.get(target, prop, receiver);
@@ -1102,6 +1393,12 @@ export class Dacument {
         return { patches, result };
     }
     queueLocalOp(payload, role) {
+        if (payload.kind === "ack") {
+            const header = { alg: "none", typ: TOKEN_TYP };
+            const token = encodeToken(header, payload);
+            this.emitEvent("change", { type: "change", ops: [{ token }] });
+            return;
+        }
         if (!roleNeedsKey(role))
             throw new Error(`Dacument: role '${role}' cannot sign ops`);
         if (!this.roleKey)
@@ -1124,6 +1421,8 @@ export class Dacument {
             this.ackByActor.set(payload.iss, payload.patch.seen);
             return true;
         }
+        if (!signerRole)
+            return false;
         if (payload.kind === "acl.set") {
             return this.applyAclPayload(payload, signerRole);
         }
@@ -1206,20 +1505,24 @@ export class Dacument {
                 const afterNodes = crdt.snapshot();
                 const afterIndex = indexMapForNodes(afterNodes);
                 const beforeLength = beforeNodes.filter((node) => !node.deleted).length;
+                for (const node of changed) {
+                    if (node.deleted)
+                        this.recordDeletedNode(payload.field, node.id, payload.stamp);
+                }
                 this.emitListOps(payload.iss, payload.field, state.schema.crdt, changed, beforeIndex, afterIndex, beforeLength);
                 return true;
             }
             case "set":
-                return this.applySetNodes(nodes, state, payload.field, payload.iss);
+                return this.applySetNodes(nodes, state, payload.field, payload.iss, payload.stamp);
             case "map":
-                return this.applyMapNodes(nodes, state, payload.field, payload.iss);
+                return this.applyMapNodes(nodes, state, payload.field, payload.iss, payload.stamp);
             case "record":
-                return this.applyRecordNodes(nodes, state, payload.field, payload.iss);
+                return this.applyRecordNodes(nodes, state, payload.field, payload.iss, payload.stamp);
             default:
                 return false;
         }
     }
-    applySetNodes(nodes, state, field, actor) {
+    applySetNodes(nodes, state, field, actor, stamp) {
         const crdt = state.crdt;
         for (const node of nodes) {
             if (!isObject(node) || typeof node.op !== "string" || typeof node.id !== "string")
@@ -1242,6 +1545,13 @@ export class Dacument {
         const accepted = crdt.merge(nodes);
         if (accepted.length === 0)
             return true;
+        for (const node of accepted) {
+            if (node.op !== "rem")
+                continue;
+            this.recordDeleteNodeStamp(field, node.id, stamp);
+            for (const targetTag of node.targets)
+                this.recordTombstone(field, targetTag, stamp);
+        }
         const after = [...crdt.values()];
         const { added, removed } = this.diffSet(before, after);
         for (const value of added)
@@ -1250,7 +1560,7 @@ export class Dacument {
             this.emitMerge(actor, field, "delete", { value });
         return true;
     }
-    applyMapNodes(nodes, state, field, actor) {
+    applyMapNodes(nodes, state, field, actor, stamp) {
         const crdt = state.crdt;
         for (const node of nodes) {
             if (!isObject(node) || typeof node.op !== "string" || typeof node.id !== "string")
@@ -1275,6 +1585,13 @@ export class Dacument {
         const accepted = crdt.merge(nodes);
         if (accepted.length === 0)
             return true;
+        for (const node of accepted) {
+            if (node.op !== "del")
+                continue;
+            this.recordDeleteNodeStamp(field, node.id, stamp);
+            for (const targetTag of node.targets)
+                this.recordTombstone(field, targetTag, stamp);
+        }
         const after = this.mapValue(crdt);
         const { set, removed } = this.diffMap(before, after);
         for (const entry of set)
@@ -1283,7 +1600,7 @@ export class Dacument {
             this.emitMerge(actor, field, "delete", { key });
         return true;
     }
-    applyRecordNodes(nodes, state, field, actor) {
+    applyRecordNodes(nodes, state, field, actor, stamp) {
         const crdt = state.crdt;
         for (const node of nodes) {
             if (!isObject(node) || typeof node.op !== "string" || typeof node.id !== "string")
@@ -1306,6 +1623,13 @@ export class Dacument {
         const accepted = crdt.merge(nodes);
         if (accepted.length === 0)
             return true;
+        for (const node of accepted) {
+            if (node.op !== "del")
+                continue;
+            this.recordDeleteNodeStamp(field, node.id, stamp);
+            for (const targetTag of node.targets)
+                this.recordTombstone(field, targetTag, stamp);
+        }
         const after = this.recordValue(crdt);
         const { set, removed } = this.diffRecord(before, after);
         for (const [key, value] of Object.entries(set))
@@ -1427,6 +1751,123 @@ export class Dacument {
         }
         return { set, removed };
     }
+    emitInvalidationDiffs(beforeValues, actor) {
+        for (const [field, state] of this.fields.entries()) {
+            const before = beforeValues.get(field);
+            const after = this.fieldValue(field);
+            this.emitFieldDiff(actor, field, state.schema, before, after);
+        }
+    }
+    emitFieldDiff(actor, field, schema, before, after) {
+        switch (schema.crdt) {
+            case "register":
+                if (!Object.is(before, after))
+                    this.emitMerge(actor, field, "set", { value: after });
+                return;
+            case "text": {
+                const beforeText = typeof before === "string" ? before : "";
+                const afterText = typeof after === "string" ? after : "";
+                if (beforeText === afterText)
+                    return;
+                this.emitTextDiff(actor, field, beforeText, afterText);
+                return;
+            }
+            case "array": {
+                const beforeArr = Array.isArray(before) ? before : [];
+                const afterArr = Array.isArray(after) ? after : [];
+                if (this.arrayEquals(beforeArr, afterArr))
+                    return;
+                this.emitArrayDiff(actor, field, beforeArr, afterArr);
+                return;
+            }
+            case "set": {
+                const beforeArr = Array.isArray(before) ? before : [];
+                const afterArr = Array.isArray(after) ? after : [];
+                const { added, removed } = this.diffSet(beforeArr, afterArr);
+                for (const value of added)
+                    this.emitMerge(actor, field, "add", { value });
+                for (const value of removed)
+                    this.emitMerge(actor, field, "delete", { value });
+                return;
+            }
+            case "map": {
+                const beforeArr = Array.isArray(before) ? before : [];
+                const afterArr = Array.isArray(after) ? after : [];
+                const { set, removed } = this.diffMap(beforeArr, afterArr);
+                for (const entry of set)
+                    this.emitMerge(actor, field, "set", entry);
+                for (const key of removed)
+                    this.emitMerge(actor, field, "delete", { key });
+                return;
+            }
+            case "record": {
+                const beforeRec = before && isObject(before) && !Array.isArray(before) ? before : {};
+                const afterRec = after && isObject(after) && !Array.isArray(after) ? after : {};
+                const { set, removed } = this.diffRecord(beforeRec, afterRec);
+                for (const [key, value] of Object.entries(set))
+                    this.emitMerge(actor, field, "set", { key, value });
+                for (const key of removed)
+                    this.emitMerge(actor, field, "delete", { key });
+            }
+        }
+    }
+    emitTextDiff(actor, field, before, after) {
+        const beforeChars = [...before];
+        const afterChars = [...after];
+        const prefix = this.commonPrefix(beforeChars, afterChars);
+        const suffix = this.commonSuffix(beforeChars, afterChars, prefix);
+        const beforeEnd = beforeChars.length - suffix;
+        const afterEnd = afterChars.length - suffix;
+        for (let index = beforeEnd - 1; index >= prefix; index--) {
+            this.emitMerge(actor, field, "deleteAt", { index });
+        }
+        for (let index = prefix; index < afterEnd; index++) {
+            this.emitMerge(actor, field, "insertAt", {
+                index,
+                value: afterChars[index],
+            });
+        }
+    }
+    emitArrayDiff(actor, field, before, after) {
+        const prefix = this.commonPrefix(before, after);
+        const suffix = this.commonSuffix(before, after, prefix);
+        const beforeEnd = before.length - suffix;
+        const afterEnd = after.length - suffix;
+        for (let index = beforeEnd - 1; index >= prefix; index--) {
+            this.emitMerge(actor, field, "deleteAt", { index });
+        }
+        for (let index = prefix; index < afterEnd; index++) {
+            this.emitMerge(actor, field, "insertAt", {
+                index,
+                value: after[index],
+            });
+        }
+    }
+    arrayEquals(left, right) {
+        if (left.length !== right.length)
+            return false;
+        for (let index = 0; index < left.length; index++) {
+            if (!Object.is(left[index], right[index]))
+                return false;
+        }
+        return true;
+    }
+    commonPrefix(left, right) {
+        const max = Math.min(left.length, right.length);
+        let index = 0;
+        while (index < max && Object.is(left[index], right[index]))
+            index++;
+        return index;
+    }
+    commonSuffix(left, right, prefix) {
+        const max = Math.min(left.length, right.length) - prefix;
+        let count = 0;
+        while (count < max &&
+            Object.is(left[left.length - 1 - count], right[right.length - 1 - count])) {
+            count++;
+        }
+        return count;
+    }
     setRole(actorId, role) {
         const stamp = this.clock.next();
         const signerRole = this.aclLog.roleAt(this.actorId, stamp);
@@ -1490,17 +1931,19 @@ export class Dacument {
             listener(event);
     }
     emitMerge(actor, target, method, data) {
+        if (this.suppressMerge)
+            return;
         if (this.isRevoked())
             return;
         this.emitEvent("merge", { type: "merge", actor, target, method, data });
     }
-    emitRevoked(previous, payload) {
+    emitRevoked(previous, by, stamp) {
         this.emitEvent("revoked", {
             type: "revoked",
             actorId: this.actorId,
             previous,
-            by: payload.iss,
-            stamp: payload.stamp,
+            by,
+            stamp,
         });
     }
     emitError(error) {
@@ -1557,19 +2000,6 @@ export class Dacument {
         if (typeof payload.schema !== "string")
             return false;
         return true;
-    }
-    resolveSignerRole(payload) {
-        const role = this.aclLog.roleAt(payload.iss, payload.stamp);
-        if (roleNeedsKey(role))
-            return role;
-        if (this.aclLog.isEmpty() &&
-            payload.kind === "acl.set" &&
-            isAclPatch(payload.patch) &&
-            payload.patch.role === "owner" &&
-            payload.patch.target === payload.iss) {
-            return "owner";
-        }
-        return null;
     }
     assertSchemaKeys() {
         const reserved = new Set([

@@ -1,5 +1,9 @@
-import { type AclAssignment, type DacumentEventMap, type DocFieldAccess, type DocSnapshot, type DocValue, type RoleKeys, type RolePublicKeys, type SchemaDefinition, type SchemaId, type SignedOp, type Role, array, map, record, register, set, text } from "./types.js";
+import { type AclAssignment, type DacumentEventMap, type DocFieldAccess, type DocSnapshot, type RoleKeys, type RolePublicKeys, type SchemaDefinition, type SchemaId, type SignedOp, type Role, array, map, record, register, set, text } from "./types.js";
 export declare class Dacument<S extends SchemaDefinition> {
+    private static actorId?;
+    static setActorId(actorId: string): void;
+    private static requireActorId;
+    private static isValidActorId;
     static schema: <Schema extends SchemaDefinition>(schema: Schema) => Schema;
     static register: typeof register;
     static text: typeof text;
@@ -7,11 +11,9 @@ export declare class Dacument<S extends SchemaDefinition> {
     static set: typeof set;
     static map: typeof map;
     static record: typeof record;
-    static generateId(): string;
     static computeSchemaId(schema: SchemaDefinition): Promise<SchemaId>;
     static create<Schema extends SchemaDefinition>(params: {
         schema: Schema;
-        ownerId: string;
         docId?: string;
     }): Promise<{
         docId: string;
@@ -21,7 +23,6 @@ export declare class Dacument<S extends SchemaDefinition> {
     }>;
     static load<Schema extends SchemaDefinition>(params: {
         schema: Schema;
-        actorId: string;
         roleKey?: JsonWebKey;
         snapshot: DocSnapshot;
     }): Promise<DacumentDoc<Schema>>;
@@ -36,11 +37,20 @@ export declare class Dacument<S extends SchemaDefinition> {
     private readonly roleKeys;
     private readonly opLog;
     private readonly opTokens;
+    private readonly verifiedOps;
+    private readonly appliedTokens;
     private currentRole;
     private readonly revokedCrdtByField;
+    private readonly deleteStampsByField;
+    private readonly tombstoneStampsByField;
+    private readonly deleteNodeStampsByField;
     private readonly eventListeners;
     private readonly pending;
     private readonly ackByActor;
+    private suppressMerge;
+    private ackScheduled;
+    private lastGcBarrier;
+    private snapshotFieldValues;
     readonly acl: {
         setRole: (actorId: string, role: Role) => void;
         getRole: (actorId: string) => Role;
@@ -51,30 +61,36 @@ export declare class Dacument<S extends SchemaDefinition> {
         schema: S;
         schemaId: SchemaId;
         docId: string;
-        actorId: string;
         roleKey?: JsonWebKey;
         roleKeys: RolePublicKeys;
     });
     addEventListener<K extends keyof DacumentEventMap>(type: K, listener: (event: DacumentEventMap[K]) => void): void;
     removeEventListener<K extends keyof DacumentEventMap>(type: K, listener: (event: DacumentEventMap[K]) => void): void;
-    onChange(listener: (ops: SignedOp[]) => void): () => void;
-    onFieldChange<K extends keyof S & string>(field: K, listener: (value: DocValue<S>[K]) => void): () => void;
-    onAnyFieldChange(listener: (field: keyof S & string, value: DocValue<S>[keyof S & string]) => void): () => void;
-    onError(listener: (error: Error) => void): () => void;
-    onRevoked(listener: (event: DacumentEventMap["revoked"]) => void): () => void;
     flush(): Promise<void>;
     snapshot(): DocSnapshot;
     merge(input: SignedOp | SignedOp[] | string | string[]): Promise<{
         accepted: SignedOp[];
         rejected: number;
     }>;
-    ack(): void;
+    private rebuildFromVerified;
+    private ack;
+    private scheduleAck;
+    private computeGcBarrier;
+    private maybeGc;
+    private compactFields;
+    private compactListField;
+    private compactTombstoneField;
     private setRegisterValue;
     private createFieldView;
     private shadowFor;
     private isRevoked;
     private readCrdt;
     private revokedCrdt;
+    private stampMapFor;
+    private setMinStamp;
+    private recordDeletedNode;
+    private recordTombstone;
+    private recordDeleteNodeStamp;
     private createTextView;
     private createArrayView;
     private createSetView;
@@ -98,6 +114,13 @@ export declare class Dacument<S extends SchemaDefinition> {
     private diffSet;
     private diffMap;
     private diffRecord;
+    private emitInvalidationDiffs;
+    private emitFieldDiff;
+    private emitTextDiff;
+    private emitArrayDiff;
+    private arrayEquals;
+    private commonPrefix;
+    private commonSuffix;
     private setRole;
     private recordValue;
     private mapValue;
@@ -113,7 +136,6 @@ export declare class Dacument<S extends SchemaDefinition> {
     private assertValueArray;
     private assertMapKey;
     private isValidPayload;
-    private resolveSignerRole;
     private assertSchemaKeys;
 }
 export type DacumentDoc<S extends SchemaDefinition> = Dacument<S> & DocFieldAccess<S>;

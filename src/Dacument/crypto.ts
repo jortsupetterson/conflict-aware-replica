@@ -1,7 +1,9 @@
 import { Bytes } from "bytecodec";
 import { SigningAgent, VerificationAgent } from "zeyra";
 
-type Header = { alg: "ES256"; typ: string; kid?: string };
+type SignedHeader = { alg: "ES256"; typ: string; kid?: string };
+type UnsignedHeader = { alg: "none"; typ: string; kid?: string };
+type Header = SignedHeader | UnsignedHeader;
 
 type DecodedToken = {
   header: Header;
@@ -32,7 +34,7 @@ function decodePart(part: string): unknown {
 
 export async function signToken(
   privateJwk: JsonWebKey,
-  header: Header,
+  header: SignedHeader,
   payload: unknown
 ): Promise<string> {
   const headerJson = stableStringify(header);
@@ -44,6 +46,14 @@ export async function signToken(
   const signature = await signer.sign(Bytes.fromString(signingInput));
   const signatureB64 = Bytes.toBase64UrlString(signature);
   return `${signingInput}.${signatureB64}`;
+}
+
+export function encodeToken(header: UnsignedHeader, payload: unknown): string {
+  const headerJson = stableStringify(header);
+  const payloadJson = stableStringify(payload);
+  const headerB64 = Bytes.toBase64UrlString(Bytes.fromString(headerJson));
+  const payloadB64 = Bytes.toBase64UrlString(Bytes.fromString(payloadJson));
+  return `${headerB64}.${payloadB64}.`;
 }
 
 export function decodeToken(token: string): DecodedToken | null {
@@ -64,7 +74,7 @@ export async function verifyToken(
   publicJwk: JsonWebKey,
   token: string,
   expectedTyp: string
-): Promise<{ header: Header; payload: unknown } | false> {
+): Promise<{ header: SignedHeader; payload: unknown } | false> {
   const decoded = decodeToken(token);
   if (!decoded) return false;
   const { header, payload, signature, headerB64, payloadB64 } = decoded;

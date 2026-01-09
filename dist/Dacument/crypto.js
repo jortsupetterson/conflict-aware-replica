@@ -27,6 +27,13 @@ export async function signToken(privateJwk, header, payload) {
     const signatureB64 = Bytes.toBase64UrlString(signature);
     return `${signingInput}.${signatureB64}`;
 }
+export function encodeToken(header, payload) {
+    const headerJson = stableStringify(header);
+    const payloadJson = stableStringify(payload);
+    const headerB64 = Bytes.toBase64UrlString(Bytes.fromString(headerJson));
+    const payloadB64 = Bytes.toBase64UrlString(Bytes.fromString(payloadJson));
+    return `${headerB64}.${payloadB64}.`;
+}
 export function decodeToken(token) {
     const parts = token.split(".");
     if (parts.length !== 3)

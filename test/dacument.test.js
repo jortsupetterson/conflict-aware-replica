@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Bytes } from "bytecodec";
+import { Bytes, generateNonce } from "bytecodec";
 import { Dacument } from "../dist/index.js";
+import { encodeToken, signToken } from "../dist/Dacument/crypto.js";
+
+const ACTOR_ID = generateNonce();
+Dacument.setActorId(ACTOR_ID);
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/ }),
@@ -11,16 +15,75 @@ const schema = Dacument.schema({
   meta: Dacument.record({ jsType: "string" }),
 });
 
+function makeStamp(clockId, wallTimeMs) {
+  return { wallTimeMs, logical: 0, clockId };
+}
+
+async function signRegisterOp({
+  roleKey,
+  signerRole,
+  iss,
+  docId,
+  schemaId,
+  field,
+  value,
+  stamp,
+}) {
+  const payload = {
+    iss,
+    sub: docId,
+    iat: Math.floor(Date.now() / 1000),
+    stamp,
+    kind: "register.set",
+    schema: schemaId,
+    field,
+    patch: { value },
+  };
+  return signToken(
+    roleKey,
+    { alg: "ES256", typ: "DACOP", kid: `${iss}:${signerRole}` },
+    payload
+  );
+}
+
+async function signAclOp({
+  roleKey,
+  signerRole,
+  iss,
+  docId,
+  schemaId,
+  target,
+  role,
+  stamp,
+}) {
+  const payload = {
+    iss,
+    sub: docId,
+    iat: Math.floor(Date.now() / 1000),
+    stamp,
+    kind: "acl.set",
+    schema: schemaId,
+    patch: {
+      id: generateNonce(),
+      target,
+      role,
+    },
+  };
+  return signToken(
+    roleKey,
+    { alg: "ES256", typ: "DACOP", kid: `${iss}:${signerRole}` },
+    payload
+  );
+}
+
 async function createOwnerDoc() {
-  const ownerId = Dacument.generateId();
-  const { snapshot, roleKeys } = await Dacument.create({ schema, ownerId });
+  const { snapshot, roleKeys } = await Dacument.create({ schema });
   const doc = await Dacument.load({
     schema,
-    actorId: ownerId,
     roleKey: roleKeys.owner.privateKey,
     snapshot,
   });
-  return { doc, snapshot, roleKeys, ownerId };
+  return { doc, snapshot, roleKeys, ownerId: ACTOR_ID };
 }
 
 test("create enforces schema and register behavior", async () => {
@@ -47,38 +110,107 @@ test("create enforces schema and register behavior", async () => {
   }, /unknown field/i);
 });
 
-test("local ops sign and merge across replicas", async () => {
-  const { doc } = await createOwnerDoc();
+test("merge accepts editor register ops", async () => {
+  const { doc, roleKeys } = await createOwnerDoc();
   const ops = [];
   doc.addEventListener("change", (event) => ops.push(...event.ops));
 
-  const peerId = Dacument.generateId();
-  doc.acl.setRole(peerId, "viewer");
+  const editorId = generateNonce();
+  doc.acl.setRole(editorId, "editor");
   await doc.flush();
   await doc.merge(ops);
   ops.length = 0;
 
-  const snapshot = doc.snapshot();
-  doc.title = "alpha";
-  doc.body.insertAt(0, "h");
-  doc.items.push("milk");
-  doc.tags.add("x");
-  doc.meta.note = "ok";
-  await doc.flush();
-
-  const peer = await Dacument.load({
-    schema,
-    actorId: peerId,
-    snapshot,
+  const stamp = makeStamp(editorId, Date.now() + 10);
+  const token = await signRegisterOp({
+    roleKey: roleKeys.editor.privateKey,
+    signerRole: "editor",
+    iss: editorId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    field: "title",
+    value: "alpha",
+    stamp,
   });
 
-  const result = await peer.merge(ops);
+  const result = await doc.merge([{ token }]);
   assert.equal(result.rejected, 0);
-  assert.equal(peer.title, "alpha");
-  assert.equal(peer.body.toString(), "h");
-  assert.deepEqual([...peer.items], ["milk"]);
-  assert.equal(peer.tags.has("x"), true);
-  assert.equal(peer.meta.note, "ok");
+  assert.equal(doc.title, "alpha");
+});
+
+test("viewer acks are unsigned", async () => {
+  const { doc } = await createOwnerDoc();
+  const ownerOps = [];
+  doc.addEventListener("change", (event) => ownerOps.push(...event.ops));
+
+  const viewerId = generateNonce();
+  doc.acl.setRole(viewerId, "viewer");
+  await doc.flush();
+  await doc.merge(ownerOps);
+  ownerOps.length = 0;
+
+  const seen = makeStamp(viewerId, Date.now());
+  const token = encodeToken(
+    { alg: "none", typ: "DACOP" },
+    {
+      iss: viewerId,
+      sub: doc.docId,
+      iat: Math.floor(Date.now() / 1000),
+      stamp: seen,
+      kind: "ack",
+      schema: doc.schemaId,
+      patch: { seen },
+    }
+  );
+
+  const result = await doc.merge([{ token }]);
+  assert.equal(result.rejected, 0);
+});
+
+test("writer acks are unsigned", async () => {
+  const { doc } = await createOwnerDoc();
+  const ops = [];
+  doc.addEventListener("change", (event) => ops.push(...event.ops));
+
+  doc.title = "alpha";
+  await doc.flush();
+  const changeOps = ops.slice();
+  ops.length = 0;
+
+  await doc.merge(changeOps);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.ok(ops.length > 0);
+  const [headerB64, payloadB64] = ops[0].token.split(".");
+  const headerJson = Bytes.toString(Bytes.fromBase64UrlString(headerB64));
+  const header = JSON.parse(headerJson);
+  const payloadJson = Bytes.toString(Bytes.fromBase64UrlString(payloadB64));
+  const payload = JSON.parse(payloadJson);
+  assert.equal(header.alg, "none");
+  assert.equal(payload.kind, "ack");
+});
+
+test("signed acks are rejected", async () => {
+  const { doc, roleKeys, ownerId } = await createOwnerDoc();
+  const stamp = { wallTimeMs: Date.now(), logical: 0, clockId: ownerId };
+  const payload = {
+    iss: ownerId,
+    sub: doc.docId,
+    iat: Math.floor(Date.now() / 1000),
+    stamp,
+    kind: "ack",
+    schema: doc.schemaId,
+    patch: { seen: stamp },
+  };
+  const token = await signToken(roleKeys.owner.privateKey, {
+    alg: "ES256",
+    typ: "DACOP",
+    kid: `${ownerId}:owner`,
+  }, payload);
+
+  const result = await doc.merge([{ token }]);
+  assert.equal(result.accepted.length, 0);
+  assert.equal(result.rejected, 1);
 });
 
 test("acl roles gate writes by stamp", async () => {
@@ -86,26 +218,28 @@ test("acl roles gate writes by stamp", async () => {
   const ownerOps = [];
   doc.addEventListener("change", (event) => ownerOps.push(...event.ops));
 
-  const bobId = Dacument.generateId();
-  const replicaId = Dacument.generateId();
+  const bobId = generateNonce();
   doc.acl.setRole(bobId, "editor");
-  doc.acl.setRole(replicaId, "viewer");
   await doc.flush();
   await doc.merge(ownerOps);
   ownerOps.length = 0;
 
-  const bob = await Dacument.load({
-    schema,
-    actorId: bobId,
+  const baseTime = Date.now() + 1000;
+  const firstStamp = makeStamp(bobId, baseTime);
+  const firstToken = await signRegisterOp({
     roleKey: roleKeys.editor.privateKey,
-    snapshot: doc.snapshot(),
+    signerRole: "editor",
+    iss: bobId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    field: "title",
+    value: "bob",
+    stamp: firstStamp,
   });
 
-  const bobOps = [];
-  bob.addEventListener("change", (event) => bobOps.push(...event.ops));
-
-  bob.title = "bob";
-  await bob.flush();
+  const acceptedFirst = await doc.merge([{ token: firstToken }]);
+  assert.equal(acceptedFirst.accepted.length, 1);
+  assert.equal(doc.title, "bob");
 
   await new Promise((resolve) => setTimeout(resolve, 5));
   doc.acl.setRole(bobId, "revoked");
@@ -113,41 +247,27 @@ test("acl roles gate writes by stamp", async () => {
   await doc.merge(ownerOps);
   ownerOps.length = 0;
 
-  const replica = await Dacument.load({
-    schema,
-    actorId: replicaId,
-    snapshot: doc.snapshot(),
+  const secondStamp = makeStamp(bobId, baseTime + 10);
+  const secondToken = await signRegisterOp({
+    roleKey: roleKeys.editor.privateKey,
+    signerRole: "editor",
+    iss: bobId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    field: "title",
+    value: "bob again",
+    stamp: secondStamp,
   });
 
-  const acceptedFirst = await replica.merge([bobOps[0]]);
-  assert.equal(acceptedFirst.accepted.length, 1);
-  assert.equal(replica.title, "bob");
-
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  bob.title = "bob again";
-  await bob.flush();
-
-  const acceptedSecond = await replica.merge([bobOps[1]]);
+  const acceptedSecond = await doc.merge([{ token: secondToken }]);
   assert.equal(acceptedSecond.accepted.length, 0);
+  assert.equal(doc.title, "bob");
 });
 
 test("revoked reads return initial values", async () => {
-  const { doc, roleKeys } = await createOwnerDoc();
+  const { doc } = await createOwnerDoc();
   const ownerOps = [];
   doc.addEventListener("change", (event) => ownerOps.push(...event.ops));
-
-  const editorId = Dacument.generateId();
-  doc.acl.setRole(editorId, "editor");
-  await doc.flush();
-  await doc.merge(ownerOps);
-  ownerOps.length = 0;
-
-  const editor = await Dacument.load({
-    schema,
-    actorId: editorId,
-    roleKey: roleKeys.editor.privateKey,
-    snapshot: doc.snapshot(),
-  });
 
   doc.title = "alpha";
   doc.body.insertAt(0, "h");
@@ -159,26 +279,24 @@ test("revoked reads return initial values", async () => {
   const changeOps = ownerOps.slice();
   ownerOps.length = 0;
   await doc.merge(changeOps);
-  await editor.merge(changeOps);
 
-  assert.equal(editor.title, "alpha");
-  assert.equal(editor.body.toString(), "h");
+  assert.equal(doc.title, "alpha");
+  assert.equal(doc.body.toString(), "h");
 
-  doc.acl.setRole(editorId, "revoked");
+  doc.acl.setRole(ACTOR_ID, "revoked");
   await doc.flush();
 
   const revokeOps = ownerOps.slice();
   ownerOps.length = 0;
   await doc.merge(revokeOps);
-  await editor.merge(revokeOps);
 
-  assert.equal(editor.title, null);
-  assert.equal(editor.body.toString(), "");
-  assert.deepEqual([...editor.items], []);
-  assert.equal(editor.tags.has("x"), false);
-  assert.equal(editor.meta.note, undefined);
+  assert.equal(doc.title, null);
+  assert.equal(doc.body.toString(), "");
+  assert.deepEqual([...doc.items], []);
+  assert.equal(doc.tags.has("x"), false);
+  assert.equal(doc.meta.note, undefined);
   assert.throws(() => {
-    editor.snapshot();
+    doc.snapshot();
   }, /revoked/i);
 });
 
@@ -187,22 +305,28 @@ test("managers cannot grant manager role", async () => {
   const ownerOps = [];
   doc.addEventListener("change", (event) => ownerOps.push(...event.ops));
 
-  const managerId = Dacument.generateId();
+  const managerId = generateNonce();
   doc.acl.setRole(managerId, "manager");
   await doc.flush();
   await doc.merge(ownerOps);
   ownerOps.length = 0;
 
-  const manager = await Dacument.load({
-    schema,
-    actorId: managerId,
+  const targetId = generateNonce();
+  const stamp = makeStamp(managerId, Date.now());
+  const token = await signAclOp({
     roleKey: roleKeys.manager.privateKey,
-    snapshot: doc.snapshot(),
+    signerRole: "manager",
+    iss: managerId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    target: targetId,
+    role: "manager",
+    stamp,
   });
 
-  assert.throws(() => {
-    manager.acl.setRole(Dacument.generateId(), "manager");
-  }, /cannot grant/i);
+  const result = await doc.merge([{ token }]);
+  assert.equal(result.accepted.length, 0);
+  assert.equal(doc.acl.getRole(targetId), "revoked");
 });
 
 test("invalid signature is rejected", async () => {
@@ -218,7 +342,6 @@ test("invalid signature is rejected", async () => {
   const tampered = { token: [header, tamperedPayload, signature].join(".") };
   const peer = await Dacument.load({
     schema,
-    actorId: Dacument.generateId(),
     snapshot,
   });
 
@@ -227,9 +350,81 @@ test("invalid signature is rejected", async () => {
   assert.equal(result.rejected, 1);
 });
 
-test("id generation is 256-bit base64url", async () => {
-  const id = Dacument.generateId();
-  assert.equal(typeof id, "string");
-  assert.equal(id.length, 43);
-  assert.equal(Bytes.fromBase64UrlString(id).byteLength, 32);
+test("corrupt snapshot ops are ignored", async () => {
+  const { doc, roleKeys, ownerId } = await createOwnerDoc();
+  const ops = [];
+  doc.addEventListener("change", (event) => ops.push(...event.ops));
+  doc.title = "alpha";
+  await doc.flush();
+  await doc.merge(ops);
+
+  const snapshot = doc.snapshot();
+  const corrupt = {
+    token:
+      snapshot.ops[0].token.slice(0, -1) +
+      (snapshot.ops[0].token.slice(-1) === "a" ? "b" : "a"),
+  };
+
+  const loaded = await Dacument.load({
+    schema,
+    roleKey: roleKeys.owner.privateKey,
+    snapshot: { ...snapshot, ops: [...snapshot.ops, corrupt] },
+  });
+
+  assert.equal(loaded.title, "alpha");
 });
+
+test("revocations invalidate out-of-order ops", async () => {
+  const { doc, roleKeys } = await createOwnerDoc();
+
+  const bobId = generateNonce();
+  const baseTime = Date.now() + 1000;
+
+  const grantToken = await signAclOp({
+    roleKey: roleKeys.owner.privateKey,
+    signerRole: "owner",
+    iss: ACTOR_ID,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    target: bobId,
+    role: "editor",
+    stamp: makeStamp(ACTOR_ID, baseTime),
+  });
+
+  const bobToken = await signRegisterOp({
+    roleKey: roleKeys.editor.privateKey,
+    signerRole: "editor",
+    iss: bobId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    field: "title",
+    value: "rogue",
+    stamp: makeStamp(bobId, baseTime + 20),
+  });
+
+  const revokeToken = await signAclOp({
+    roleKey: roleKeys.owner.privateKey,
+    signerRole: "owner",
+    iss: ACTOR_ID,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    target: bobId,
+    role: "revoked",
+    stamp: makeStamp(ACTOR_ID, baseTime + 10),
+  });
+
+  const acceptedFirst = await doc.merge([{ token: grantToken }, { token: bobToken }]);
+  assert.equal(acceptedFirst.accepted.length, 2);
+  assert.equal(doc.title, "rogue");
+
+  await doc.merge([{ token: revokeToken }]);
+  assert.equal(doc.title, null);
+});
+
+test("docId generation is 256-bit base64url", async () => {
+  const { docId } = await Dacument.create({ schema });
+  assert.equal(typeof docId, "string");
+  assert.equal(docId.length, 43);
+  assert.equal(Bytes.fromBase64UrlString(docId).byteLength, 32);
+});
+

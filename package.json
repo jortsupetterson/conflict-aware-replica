@@ -18,19 +18,10 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test:only": "node --test test/*.test.js",
-    "test": "npm run build && npm run test:only",
-    "bench:crarray": "node bench/crarray.bench.js",
-    "bench:crtext": "node bench/crtext.bench.js",
-    "bench:crregister": "node bench/crregister.bench.js",
-    "bench:crmap": "node bench/crmap.bench.js",
-    "bench:crset": "node bench/crset.bench.js",
-    "bench:crrecord": "node bench/crrecord.bench.js",
-    "bench:all": "node bench/crarray.bench.js && node bench/crtext.bench.js && node bench/crregister.bench.js && node bench/crmap.bench.js && node bench/crset.bench.js && node bench/crrecord.bench.js",
-    "bench": "npm run build && npm run bench:all",
-    "sim:dacument:only": "node bench/dacument.sim.js",
-    "sim:dacument": "npm run build && npm run sim:dacument:only",
-    "verify": "npm run build && npm run test:only && npm run bench:all && npm run sim:dacument:only"
+    "test": "npm run build && node --test test/*.test.js",
+    "bench": "npm run build && node bench/index.js",
+    "sim": "npm run build && node bench/dacument.sim.js",
+    "verify": "npm run test && npm run bench && npm run sim"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -48,12 +39,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jortsupetterson/simple-crdts.git"
+    "url": "git+https://github.com/jortsupetterson/dacument.git"
   },
   "bugs": {
-    "url": "https://github.com/jortsupetterson/simple-crdts/issues"
+    "url": "https://github.com/jortsupetterson/dacument/issues"
   },
-  "homepage": "https://github.com/jortsupetterson/simple-crdts#readme",
+  "homepage": "https://github.com/jortsupetterson/dacument#readme",
   "engines": {
     "node": ">=18"
   },

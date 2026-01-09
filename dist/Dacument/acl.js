@@ -28,6 +28,12 @@ export class AclLog {
     snapshot() {
         return this.nodes.slice();
     }
+    reset() {
+        this.nodes.length = 0;
+        this.nodesById.clear();
+        this.nodesByActor.clear();
+        this.currentByActor.clear();
+    }
     isEmpty() {
         return this.nodes.length === 0;
     }
@@ -42,20 +48,12 @@ export class AclLog {
         }
         return "revoked";
     }
-    entryAt(actorId, stamp) {
-        const list = this.nodesByActor.get(actorId);
-        if (!list || list.length === 0)
-            return null;
-        for (let index = list.length - 1; index >= 0; index--) {
-            const entry = list[index];
-            if (compareHLC(entry.stamp, stamp) <= 0)
-                return entry;
-        }
-        return null;
-    }
     currentRole(actorId) {
         const entry = this.currentByActor.get(actorId);
         return entry ? entry.role : "revoked";
+    }
+    currentEntry(actorId) {
+        return this.currentByActor.get(actorId) ?? null;
     }
     knownActors() {
         return [...this.currentByActor.keys()];

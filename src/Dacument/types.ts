@@ -177,7 +177,6 @@ export type TextView = {
   at(index: number): string | undefined;
   insertAt(index: number, value: string): unknown;
   deleteAt(index: number): string | undefined;
-  onChange(listener: (value: string) => void): () => void;
   [Symbol.iterator](): Iterator<string>;
 };
 
@@ -202,7 +201,6 @@ export type ArrayView<T> = {
   forEach(callback: (value: T, index: number, array: T[]) => void, thisArg?: unknown): void;
   includes(value: T): boolean;
   indexOf(value: T): number;
-  onChange(listener: (value: T[]) => void): () => void;
   [Symbol.iterator](): Iterator<T>;
 };
 
@@ -216,7 +214,6 @@ export type SetView<T> = {
   keys(): SetIterator<T>;
   values(): SetIterator<T>;
   forEach(callback: (value: T, value2: T, set: Set<T>) => void, thisArg?: unknown): void;
-  onChange(listener: (value: T[]) => void): () => void;
   [Symbol.iterator](): SetIterator<T>;
   [Symbol.toStringTag]: string;
 };
@@ -235,15 +232,11 @@ export type MapView<V> = {
     callback: (value: V, key: unknown, map: Map<unknown, V>) => void,
     thisArg?: unknown
   ): void;
-  onChange(listener: (value: Array<[JsValue, V]>) => void): () => void;
   [Symbol.iterator](): MapIterator<[unknown, V]>;
   [Symbol.toStringTag]: string;
 };
 
 export type RecordView<T> = Record<string, T> & {
-  onChange(listener: (value: Record<string, T>) => void): () => void;
-  keys(): string[];
-  toJSON(): Record<string, T>;
 };
 
 export type FieldValue<F extends FieldSchema> = F["crdt"] extends "register"
@@ -260,26 +253,8 @@ export type FieldValue<F extends FieldSchema> = F["crdt"] extends "register"
   ? RecordView<JsTypeValue<F["jsType"]>>
   : never;
 
-export type FieldOutput<F extends FieldSchema> = F["crdt"] extends "register"
-  ? JsTypeValue<F["jsType"]>
-  : F["crdt"] extends "text"
-  ? string
-  : F["crdt"] extends "array"
-  ? JsTypeValue<F["jsType"]>[]
-  : F["crdt"] extends "set"
-  ? JsTypeValue<F["jsType"]>[]
-  : F["crdt"] extends "map"
-  ? Array<[JsValue, JsTypeValue<F["jsType"]>]>
-  : F["crdt"] extends "record"
-  ? Record<string, JsTypeValue<F["jsType"]>>
-  : never;
-
 export type DocFieldAccess<S extends SchemaDefinition> = {
   [K in keyof S]: FieldValue<S[K]>;
-};
-
-export type DocValue<S extends SchemaDefinition> = {
-  [K in keyof S]: FieldOutput<S[K]>;
 };
 
 export function isJsValue(value: unknown): value is JsValue {
