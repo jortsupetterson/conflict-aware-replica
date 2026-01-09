@@ -12,11 +12,6 @@
     "forceConsistentCasingInFileNames": true,
     "noEmitOnError": true
   },
-  "files": [
-    "src/index.ts",
-    "src/CRArray/class.ts",
-    "src/CRMap/class.ts",
-    "src/CRRecord/class.ts",
-    "src/CRSet/class.ts"
-  ]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/CRACL/**"]
 }

@@ -1,26 +1,36 @@
 {
   "name": "dacument",
   "version": "1.0.0",
-  "description": "",
-  "keywords": [],
+  "description": "Schema-driven CRDT document with signed ops and role-based ACLs.",
+  "keywords": [
+    "crdt",
+    "document",
+    "collaboration",
+    "replication",
+    "sync",
+    "acl",
+    "signature",
+    "crypto",
+    "eventual-consistency",
+    "offline"
+  ],
   "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "pretest": "npm run build",
-    "test": "node --test test/*.test.js",
-    "prebench": "npm run build",
-    "bench": "node bench/crarray.bench.js",
-    "prebench:crtext": "npm run build",
+    "test:only": "node --test test/*.test.js",
+    "test": "npm run build && npm run test:only",
+    "bench:crarray": "node bench/crarray.bench.js",
     "bench:crtext": "node bench/crtext.bench.js",
-    "prebench:crregister": "npm run build",
     "bench:crregister": "node bench/crregister.bench.js",
-    "prebench:crmap": "npm run build",
     "bench:crmap": "node bench/crmap.bench.js",
-    "prebench:crset": "npm run build",
     "bench:crset": "node bench/crset.bench.js",
-    "prebench:crrecord": "npm run build",
-    "bench:crrecord": "node bench/crrecord.bench.js"
+    "bench:crrecord": "node bench/crrecord.bench.js",
+    "bench:all": "node bench/crarray.bench.js && node bench/crtext.bench.js && node bench/crregister.bench.js && node bench/crmap.bench.js && node bench/crset.bench.js && node bench/crrecord.bench.js",
+    "bench": "npm run build && npm run bench:all",
+    "sim:dacument:only": "node bench/dacument.sim.js",
+    "sim:dacument": "npm run build && npm run sim:dacument:only",
+    "verify": "npm run build && npm run test:only && npm run bench:all && npm run sim:dacument:only"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -36,6 +46,17 @@
     "README.md",
     "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jortsupetterson/simple-crdts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jortsupetterson/simple-crdts/issues"
+  },
+  "homepage": "https://github.com/jortsupetterson/simple-crdts#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "sideEffects": false,
   "dependencies": {
     "bytecodec": "^2.1.0",

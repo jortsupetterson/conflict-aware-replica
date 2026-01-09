@@ -1,1 +1,0 @@
-Observed remove grants register
