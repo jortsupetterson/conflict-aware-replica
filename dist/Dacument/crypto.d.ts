@@ -23,4 +23,7 @@ export declare function verifyToken(publicJwk: JsonWebKey, token: string, expect
     header: SignedHeader;
     payload: unknown;
 } | false>;
+export declare function validateActorKeyPair(privateJwk: JsonWebKey, publicJwk: JsonWebKey): Promise<void>;
+export declare function signDetached(privateJwk: JsonWebKey, payload: string): Promise<string>;
+export declare function verifyDetached(publicJwk: JsonWebKey, payload: string, signatureB64: string): Promise<boolean>;
 export {};

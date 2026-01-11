@@ -4,3 +4,4 @@ import "./crregister.bench.js";
 import "./crmap.bench.js";
 import "./crset.bench.js";
 import "./crrecord.bench.js";
+import "./actor-integrity.bench.js";

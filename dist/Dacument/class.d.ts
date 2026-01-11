@@ -1,9 +1,15 @@
-import { type AclAssignment, type DacumentEventMap, type DocFieldAccess, type DocSnapshot, type RoleKeys, type RolePublicKeys, type SchemaDefinition, type SchemaId, type SignedOp, type Role, array, map, record, register, set, text } from "./types.js";
+import { type AclAssignment, type ActorInfo, type DacumentEventMap, type DocFieldAccess, type DocSnapshot, type RoleKeys, type RolePublicKeys, type SchemaDefinition, type SchemaId, type SignedOp, type VerificationResult, type VerifyActorIntegrityOptions, type Role, array, map, record, register, set, text } from "./types.js";
 export declare class Dacument<S extends SchemaDefinition> {
-    private static actorId?;
-    static setActorId(actorId: string): void;
-    private static requireActorId;
+    private static actorInfo?;
+    private static actorSigner?;
+    static setActorInfo(info: ActorInfo): Promise<void>;
+    private static requireActorInfo;
+    private static requireActorSigner;
+    private static signActorToken;
     private static isValidActorId;
+    private static assertActorKeyJwk;
+    private static assertActorPrivateKey;
+    private static assertActorPublicKey;
     static schema: <Schema extends SchemaDefinition>(schema: Schema) => Schema;
     static register: typeof register;
     static text: typeof text;
@@ -38,6 +44,8 @@ export declare class Dacument<S extends SchemaDefinition> {
     private readonly opLog;
     private readonly opTokens;
     private readonly verifiedOps;
+    private readonly opIndexByToken;
+    private readonly actorSigByToken;
     private readonly appliedTokens;
     private currentRole;
     private readonly revokedCrdtByField;
@@ -49,8 +57,10 @@ export declare class Dacument<S extends SchemaDefinition> {
     private readonly ackByActor;
     private suppressMerge;
     private ackScheduled;
+    private actorKeyPublishPending;
     private lastGcBarrier;
     private snapshotFieldValues;
+    private recordActorSig;
     readonly acl: {
         setRole: (actorId: string, role: Role) => void;
         getRole: (actorId: string) => Role;
@@ -68,11 +78,14 @@ export declare class Dacument<S extends SchemaDefinition> {
     removeEventListener<K extends keyof DacumentEventMap>(type: K, listener: (event: DacumentEventMap[K]) => void): void;
     flush(): Promise<void>;
     snapshot(): DocSnapshot;
+    selfRevoke(): void;
+    verifyActorIntegrity(options?: VerifyActorIntegrityOptions): Promise<VerificationResult>;
     merge(input: SignedOp | SignedOp[] | string | string[]): Promise<{
         accepted: SignedOp[];
         rejected: number;
     }>;
     private rebuildFromVerified;
+    private maybePublishActorKey;
     private ack;
     private scheduleAck;
     private computeGcBarrier;
@@ -102,6 +115,7 @@ export declare class Dacument<S extends SchemaDefinition> {
     private commitRecordMutation;
     private capturePatches;
     private queueLocalOp;
+    private queueActorOp;
     private applyRemotePayload;
     private applyAclPayload;
     private applyRegisterPayload;

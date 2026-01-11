@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { generateNonce } from "bytecodec";
+import { generateSignPair } from "zeyra";
 import { Dacument } from "../dist/index.js";
 import { encodeToken, signToken } from "../dist/Dacument/crypto.js";
 
@@ -46,7 +47,12 @@ function normalizeRecord(record) {
 
 if (isMainThread) {
   const ownerId = generateNonce();
-  Dacument.setActorId(ownerId);
+  const ownerKeys = await generateSignPair();
+  await Dacument.setActorInfo({
+    id: ownerId,
+    privateKeyJwk: ownerKeys.signingJwk,
+    publicKeyJwk: ownerKeys.verificationJwk,
+  });
   const schema = buildSchema();
   const { snapshot: initialSnapshot, roleKeys } = await Dacument.create({ schema });
   const doc = await Dacument.load({
@@ -57,7 +63,7 @@ if (isMainThread) {
   const workers = new Map();
   const states = new Map();
 
-  const actors = [
+  const actorSpecs = [
     { id: generateNonce(), role: "editor", mode: "good", bad: false },
     { id: generateNonce(), role: "editor", mode: "good", bad: false },
     { id: generateNonce(), role: "viewer", mode: "viewer", bad: false },
@@ -65,6 +71,11 @@ if (isMainThread) {
     { id: generateNonce(), role: "editor", mode: "spoof", bad: true },
     { id: generateNonce(), role: "editor", mode: "flood", bad: true },
   ];
+  const actors = [];
+  for (const spec of actorSpecs) {
+    const keys = await generateSignPair();
+    actors.push({ ...spec, keys });
+  }
 
   const ownerOps = [];
   let ownerDispatching = false;
@@ -199,6 +210,11 @@ if (isMainThread) {
         bad: actor.bad,
         mode: actor.mode,
         knownActors,
+        actorInfo: {
+          id: actor.id,
+          privateKeyJwk: actor.keys.signingJwk,
+          publicKeyJwk: actor.keys.verificationJwk,
+        },
       },
     });
     workers.set(actor.id, worker);
@@ -206,8 +222,8 @@ if (isMainThread) {
     worker.on("error", (err) => console.error("worker error", err));
   }
 } else {
-  const { snapshot, actorId, roleKey, bad, mode, knownActors } = workerData;
-  Dacument.setActorId(actorId);
+  const { snapshot, actorId, roleKey, bad, mode, knownActors, actorInfo } = workerData;
+  await Dacument.setActorInfo(actorInfo);
   const schema = buildSchema();
   const doc = await Dacument.load({ schema, roleKey, snapshot });
   let revoked = false;

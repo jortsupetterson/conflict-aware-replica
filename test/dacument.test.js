@@ -1,11 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Bytes, generateNonce } from "bytecodec";
+import { generateSignPair } from "zeyra";
 import { Dacument } from "../dist/index.js";
-import { encodeToken, signToken } from "../dist/Dacument/crypto.js";
+import {
+  decodeToken,
+  encodeToken,
+  signDetached,
+  signToken,
+} from "../dist/Dacument/crypto.js";
 
 const ACTOR_ID = generateNonce();
-Dacument.setActorId(ACTOR_ID);
+const actorKeys = await generateSignPair();
+await Dacument.setActorInfo({
+  id: ACTOR_ID,
+  privateKeyJwk: actorKeys.signingJwk,
+  publicKeyJwk: actorKeys.verificationJwk,
+});
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/ }),
@@ -55,7 +66,14 @@ async function signAclOp({
   target,
   role,
   stamp,
+  publicKeyJwk,
 }) {
+  const patch = {
+    id: generateNonce(),
+    target,
+    role,
+  };
+  if (publicKeyJwk) patch.publicKeyJwk = publicKeyJwk;
   const payload = {
     iss,
     sub: docId,
@@ -63,11 +81,7 @@ async function signAclOp({
     stamp,
     kind: "acl.set",
     schema: schemaId,
-    patch: {
-      id: generateNonce(),
-      target,
-      role,
-    },
+    patch,
   };
   return signToken(
     roleKey,
@@ -447,6 +461,162 @@ test("revocations invalidate out-of-order ops", async () => {
 
   await doc.merge([{ token: revokeToken }]);
   assert.equal(doc.title, null);
+});
+
+test("auto-attaches actor public key once", async () => {
+  const { docId, schemaId, roleKeys } = await Dacument.create({ schema });
+  const stamp = makeStamp(ACTOR_ID, Date.now());
+  const token = await signAclOp({
+    roleKey: roleKeys.owner.privateKey,
+    signerRole: "owner",
+    iss: ACTOR_ID,
+    docId,
+    schemaId,
+    target: ACTOR_ID,
+    role: "owner",
+    stamp,
+  });
+
+  const snapshot = {
+    docId,
+    roleKeys: {
+      owner: roleKeys.owner.publicKey,
+      manager: roleKeys.manager.publicKey,
+      editor: roleKeys.editor.publicKey,
+    },
+    ops: [{ token }],
+  };
+
+  const doc = new Dacument({
+    schema,
+    schemaId,
+    docId,
+    roleKey: roleKeys.owner.privateKey,
+    roleKeys: snapshot.roleKeys,
+  });
+  const ops = [];
+  doc.addEventListener("change", (event) => ops.push(...event.ops));
+  await doc.merge(snapshot.ops);
+  await doc.flush();
+
+  const keyOps = ops.filter((op) => {
+    const decoded = decodeToken(op.token);
+    return (
+      decoded?.payload?.kind === "acl.set" &&
+      decoded?.payload?.patch?.publicKeyJwk
+    );
+  });
+  assert.equal(keyOps.length, 1);
+
+  await doc.merge(ops);
+  ops.length = 0;
+  await doc.flush();
+
+  const keyOpsAfter = ops.filter((op) => {
+    const decoded = decodeToken(op.token);
+    return (
+      decoded?.payload?.kind === "acl.set" &&
+      decoded?.payload?.patch?.publicKeyJwk
+    );
+  });
+  assert.equal(keyOpsAfter.length, 0);
+});
+
+test("selfRevoke works for viewer", async () => {
+  const { doc } = await createOwnerDoc();
+  const ops = [];
+  doc.addEventListener("change", (event) => ops.push(...event.ops));
+
+  doc.acl.setRole(ACTOR_ID, "viewer");
+  await doc.flush();
+  await doc.merge(ops);
+  ops.length = 0;
+
+  doc.selfRevoke();
+  await doc.flush();
+
+  const revokeOps = ops.filter((op) => {
+    const decoded = decodeToken(op.token);
+    return (
+      decoded?.payload?.kind === "acl.set" &&
+      decoded?.payload?.patch?.role === "revoked"
+    );
+  });
+  assert.equal(revokeOps.length, 1);
+  const decoded = decodeToken(revokeOps[0].token);
+  assert.ok(decoded?.header?.kid?.endsWith(":actor"));
+
+  await doc.merge(revokeOps);
+  assert.equal(doc.acl.getRole(ACTOR_ID), "revoked");
+});
+
+test("actor-signed revoke is only for self", async () => {
+  const { doc } = await createOwnerDoc();
+  const targetId = generateNonce();
+  const stamp = makeStamp(ACTOR_ID, Date.now());
+  const payload = {
+    iss: ACTOR_ID,
+    sub: doc.docId,
+    iat: Math.floor(Date.now() / 1000),
+    stamp,
+    kind: "acl.set",
+    schema: doc.schemaId,
+    patch: {
+      id: generateNonce(),
+      target: targetId,
+      role: "revoked",
+      publicKeyJwk: actorKeys.verificationJwk,
+    },
+  };
+  const token = await signToken(actorKeys.signingJwk, {
+    alg: "ES256",
+    typ: "DACOP",
+    kid: `${ACTOR_ID}:actor`,
+  }, payload);
+
+  const result = await doc.merge([{ token }]);
+  assert.equal(result.accepted.length, 0);
+});
+
+test("verifyActorIntegrity detects impersonation", async () => {
+  const { doc, roleKeys } = await createOwnerDoc();
+  const bobId = generateNonce();
+  const bobKeys = await generateSignPair();
+
+  const grantToken = await signAclOp({
+    roleKey: roleKeys.owner.privateKey,
+    signerRole: "owner",
+    iss: ACTOR_ID,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    target: bobId,
+    role: "editor",
+    stamp: makeStamp(ACTOR_ID, Date.now()),
+    publicKeyJwk: bobKeys.verificationJwk,
+  });
+  await doc.merge([{ token: grantToken }]);
+
+  const opToken = await signRegisterOp({
+    roleKey: roleKeys.editor.privateKey,
+    signerRole: "editor",
+    iss: bobId,
+    docId: doc.docId,
+    schemaId: doc.schemaId,
+    field: "title",
+    value: "alpha",
+    stamp: makeStamp(bobId, Date.now() + 5),
+  });
+  const wrongKeys = await generateSignPair();
+  const actorSig = await signDetached(wrongKeys.signingJwk, opToken);
+
+  const mergeResult = await doc.merge([{ token: opToken, actorSig }]);
+  assert.equal(mergeResult.accepted.length, 1);
+
+  const verification = await doc.verifyActorIntegrity({
+    ops: [{ token: opToken, actorSig }],
+  });
+  assert.equal(verification.ok, false);
+  assert.equal(verification.failed, 1);
 });
 
 test("docId generation is 256-bit base64url", async () => {

@@ -1,5 +1,5 @@
 import { Bytes, generateNonce } from "bytecodec";
-import { generateSignPair } from "zeyra";
+import { SigningAgent, generateSignPair } from "zeyra";
 import { v7 as uuidv7 } from "uuid";
 import { CRArray } from "../CRArray/class.js";
 import { CRMap } from "../CRMap/class.js";
@@ -9,9 +9,17 @@ import { CRSet } from "../CRSet/class.js";
 import { CRText } from "../CRText/class.js";
 import { AclLog } from "./acl.js";
 import { HLC, compareHLC } from "./clock.js";
-import { decodeToken, encodeToken, signToken, verifyToken } from "./crypto.js";
+import {
+  decodeToken,
+  encodeToken,
+  signToken,
+  validateActorKeyPair,
+  verifyDetached,
+  verifyToken,
+} from "./crypto.js";
 import {
   type AclAssignment,
+  type ActorInfo,
   type DacumentEventMap,
   type DocFieldAccess,
   type DocSnapshot,
@@ -24,6 +32,8 @@ import {
   type SchemaDefinition,
   type SchemaId,
   type SignedOp,
+  type VerificationResult,
+  type VerifyActorIntegrityOptions,
   type Role,
   array,
   map,
@@ -39,6 +49,7 @@ import {
 const TOKEN_TYP = "DACOP";
 
 type SigningRole = "owner" | "manager" | "editor";
+type SignerKind = SigningRole | "actor";
 
 type FieldState = {
   schema: FieldSchema;
@@ -85,6 +96,18 @@ function stableKey(value: JsValue): string {
   return JSON.stringify(value);
 }
 
+function normalizeJwk(jwk: JsonWebKey): string {
+  const entries = Object.entries(jwk).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0
+  );
+  return JSON.stringify(Object.fromEntries(entries));
+}
+
+function jwkEquals(left?: JsonWebKey | null, right?: JsonWebKey | null): boolean {
+  if (!left || !right) return false;
+  return normalizeJwk(left) === normalizeJwk(right);
+}
+
 function isDagNode(
   node: unknown
 ): node is { id: string; value: unknown; after: string[]; deleted?: boolean } {
@@ -100,11 +123,17 @@ function isAclPatch(value: unknown): value is {
   id: string;
   target: string;
   role: Role;
+  publicKeyJwk?: JsonWebKey;
 } {
   if (!isObject(value)) return false;
   if (typeof value.id !== "string") return false;
   if (typeof value.target !== "string") return false;
   if (typeof value.role !== "string") return false;
+  if ("publicKeyJwk" in value && value.publicKeyJwk !== undefined) {
+    if (!isObject(value.publicKeyJwk)) return false;
+    const jwk = value.publicKeyJwk as JsonWebKey;
+    if (jwk.kty && jwk.kty !== "EC") return false;
+  }
   return true;
 }
 
@@ -164,14 +193,12 @@ function roleNeedsKey(role: Role): role is SigningRole {
   return role === "owner" || role === "manager" || role === "editor";
 }
 
-function parseSignerRole(
-  kid: string | undefined,
-  issuer: string
-): SigningRole | null {
+function parseSignerKind(kid: string | undefined, issuer: string): SignerKind | null {
   if (!kid) return null;
   const [kidIssuer, role] = kid.split(":");
   if (kidIssuer !== issuer) return null;
   if (role === "owner" || role === "manager" || role === "editor") return role;
+  if (role === "actor") return "actor";
   return null;
 }
 
@@ -195,19 +222,36 @@ function toPublicRoleKeys(roleKeys: RoleKeys): RolePublicKeys {
 }
 
 export class Dacument<S extends SchemaDefinition> {
-  private static actorId?: string;
+  private static actorInfo?: ActorInfo;
+  private static actorSigner?: SigningAgent;
 
-  static setActorId(actorId: string): void {
-    if (Dacument.actorId) return;
-    if (!Dacument.isValidActorId(actorId))
-      throw new Error("Dacument.setActorId: actorId must be 256-bit base64url");
-    Dacument.actorId = actorId;
+  static async setActorInfo(info: ActorInfo): Promise<void> {
+    if (Dacument.actorInfo) return;
+    if (!Dacument.isValidActorId(info.id))
+      throw new Error("Dacument.setActorInfo: id must be 256-bit base64url");
+    Dacument.assertActorPrivateKey(info.privateKeyJwk);
+    Dacument.assertActorPublicKey(info.publicKeyJwk);
+    await validateActorKeyPair(info.privateKeyJwk, info.publicKeyJwk);
+    Dacument.actorInfo = info;
+    Dacument.actorSigner = new SigningAgent(info.privateKeyJwk);
   }
 
-  private static requireActorId(): string {
-    if (!Dacument.actorId)
-      throw new Error("Dacument: actorId not set; call Dacument.setActorId()");
-    return Dacument.actorId;
+  private static requireActorInfo(): ActorInfo {
+    if (!Dacument.actorInfo)
+      throw new Error("Dacument: actor info not set; call Dacument.setActorInfo()");
+    return Dacument.actorInfo;
+  }
+
+  private static requireActorSigner(): SigningAgent {
+    if (!Dacument.actorSigner)
+      throw new Error("Dacument: actor info not set; call Dacument.setActorInfo()");
+    return Dacument.actorSigner;
+  }
+
+  private static async signActorToken(token: string): Promise<string> {
+    const signer = Dacument.requireActorSigner();
+    const signature = await signer.sign(Bytes.fromString(token));
+    return Bytes.toBase64UrlString(signature);
   }
 
   private static isValidActorId(actorId: string): boolean {
@@ -220,8 +264,29 @@ export class Dacument<S extends SchemaDefinition> {
     }
   }
 
+  private static assertActorKeyJwk(jwk: JsonWebKey, label: string): void {
+    if (!jwk || typeof jwk !== "object")
+      throw new Error(`Dacument.setActorInfo: ${label} must be a JWK object`);
+    if (jwk.kty !== "EC")
+      throw new Error(`Dacument.setActorInfo: ${label} must be EC (P-256)`);
+    if (jwk.crv && jwk.crv !== "P-256")
+      throw new Error(`Dacument.setActorInfo: ${label} must use P-256`);
+    if (jwk.alg && jwk.alg !== "ES256")
+      throw new Error(`Dacument.setActorInfo: ${label} must use ES256`);
+  }
+
+  private static assertActorPrivateKey(jwk: JsonWebKey): void {
+    Dacument.assertActorKeyJwk(jwk, "privateKeyJwk");
+    if (!jwk.d)
+      throw new Error("Dacument.setActorInfo: privateKeyJwk must include 'd'");
+  }
+
+  private static assertActorPublicKey(jwk: JsonWebKey): void {
+    Dacument.assertActorKeyJwk(jwk, "publicKeyJwk");
+  }
+
   static schema = <Schema extends SchemaDefinition>(schema: Schema): Schema => {
-    Dacument.requireActorId();
+    Dacument.requireActorInfo();
     return schema;
   };
   static register = register;
@@ -251,7 +316,8 @@ export class Dacument<S extends SchemaDefinition> {
     roleKeys: RoleKeys;
     snapshot: DocSnapshot;
   }> {
-    const ownerId = Dacument.requireActorId();
+    const ownerInfo = Dacument.requireActorInfo();
+    const ownerId = ownerInfo.id;
     const docId = params.docId ?? generateNonce();
     const schemaId = await Dacument.computeSchemaId(params.schema);
     const roleKeys = await generateRoleKeys();
@@ -281,7 +347,8 @@ export class Dacument<S extends SchemaDefinition> {
 
     const sign = async (payload: OpPayload): Promise<void> => {
       const token = await signToken(roleKeys.owner.privateKey, header, payload);
-      ops.push({ token });
+      const actorSig = await Dacument.signActorToken(token);
+      ops.push({ token, actorSig });
     };
 
     await sign({
@@ -295,6 +362,7 @@ export class Dacument<S extends SchemaDefinition> {
         id: uuidv7(),
         target: ownerId,
         role: "owner",
+        publicKeyJwk: ownerInfo.publicKeyJwk,
       },
     });
 
@@ -496,7 +564,7 @@ export class Dacument<S extends SchemaDefinition> {
     roleKey?: JsonWebKey;
     snapshot: DocSnapshot;
   }): Promise<DacumentDoc<Schema>> {
-    const actorId = Dacument.requireActorId();
+    const actorId = Dacument.requireActorInfo().id;
     const schemaId = await Dacument.computeSchemaId(params.schema);
     const doc = new Dacument<Schema>({
       schema: params.schema,
@@ -523,8 +591,10 @@ export class Dacument<S extends SchemaDefinition> {
   private readonly opTokens = new Set<string>();
   private readonly verifiedOps = new Map<
     string,
-    { payload: OpPayload; signerRole: SigningRole | null }
+    { payload: OpPayload; signerRole: SignerKind | null }
   >();
+  private readonly opIndexByToken = new Map<string, number>();
+  private readonly actorSigByToken = new Map<string, string>();
   private readonly appliedTokens = new Set<string>();
   private currentRole: Role;
   private readonly revokedCrdtByField = new Map<string, FieldState["crdt"]>();
@@ -548,12 +618,22 @@ export class Dacument<S extends SchemaDefinition> {
   private readonly ackByActor = new Map<string, AclAssignment["stamp"]>();
   private suppressMerge = false;
   private ackScheduled = false;
+  private actorKeyPublishPending = false;
   private lastGcBarrier: AclAssignment["stamp"] | null = null;
 
   private snapshotFieldValues(): Map<string, unknown> {
     const values = new Map<string, unknown>();
     for (const key of this.fields.keys()) values.set(key, this.fieldValue(key));
     return values;
+  }
+
+  private recordActorSig(token: string, actorSig: string | undefined): void {
+    if (!actorSig || this.actorSigByToken.has(token)) return;
+    this.actorSigByToken.set(token, actorSig);
+    const index = this.opIndexByToken.get(token);
+    if (index === undefined) return;
+    const entry = this.opLog[index];
+    if (!entry.actorSig) entry.actorSig = actorSig;
   }
 
   public readonly acl: {
@@ -570,7 +650,7 @@ export class Dacument<S extends SchemaDefinition> {
     roleKey?: JsonWebKey;
     roleKeys: RolePublicKeys;
   }) {
-    const actorId = Dacument.requireActorId();
+    const actorId = Dacument.requireActorInfo().id;
     this.schema = params.schema;
     this.schemaId = params.schemaId;
     this.docId = params.docId;
@@ -665,10 +745,116 @@ export class Dacument<S extends SchemaDefinition> {
 
   snapshot(): DocSnapshot {
     if (this.isRevoked()) throw new Error("Dacument: revoked actors cannot snapshot");
+    const ops = this.opLog.map((op) => {
+      const actorSig = this.actorSigByToken.get(op.token);
+      return actorSig ? { token: op.token, actorSig } : { token: op.token };
+    });
     return {
       docId: this.docId,
       roleKeys: this.roleKeys,
-      ops: this.opLog.slice(),
+      ops,
+    };
+  }
+
+  selfRevoke(): void {
+    const stamp = this.clock.next();
+    const role = this.aclLog.roleAt(this.actorId, stamp);
+    if (role === "revoked") return;
+    const actorInfo = Dacument.requireActorInfo();
+    const entry = this.aclLog.currentEntry(this.actorId);
+    const patch: {
+      id: string;
+      target: string;
+      role: Role;
+      publicKeyJwk?: JsonWebKey;
+    } = {
+      id: uuidv7(),
+      target: this.actorId,
+      role: "revoked",
+    };
+    if (!entry?.publicKeyJwk) patch.publicKeyJwk = actorInfo.publicKeyJwk;
+
+    const payload: OpPayload = {
+      iss: this.actorId,
+      sub: this.docId,
+      iat: nowSeconds(),
+      stamp,
+      kind: "acl.set",
+      schema: this.schemaId,
+      patch,
+    };
+
+    if (roleNeedsKey(role) && this.roleKey) {
+      this.queueLocalOp(payload, role);
+      return;
+    }
+    this.queueActorOp(payload);
+  }
+
+  async verifyActorIntegrity(
+    options: VerifyActorIntegrityOptions = {}
+  ): Promise<VerificationResult> {
+    const input =
+      options.token !== undefined
+        ? [options.token]
+        : options.ops ?? options.snapshot?.ops ?? this.opLog;
+    let verified = 0;
+    let failed = 0;
+    let missing = 0;
+    const failures: VerificationResult["failures"] = [];
+
+    for (let index = 0; index < input.length; index++) {
+      const item = input[index];
+      const token = typeof item === "string" ? item : item.token;
+      const actorSig =
+        typeof item === "string"
+          ? this.actorSigByToken.get(token)
+          : item.actorSig ?? this.actorSigByToken.get(token);
+      const decoded = decodeToken(token);
+      if (!decoded) {
+        failed++;
+        failures.push({ index, reason: "invalid token" });
+        continue;
+      }
+      const payload = decoded.payload as OpPayload;
+      if (!this.isValidPayload(payload)) {
+        failed++;
+        failures.push({ index, reason: "invalid payload" });
+        continue;
+      }
+      if (!actorSig) {
+        missing++;
+        continue;
+      }
+      const publicKey = this.aclLog.publicKeyAt(payload.iss, payload.stamp);
+      if (!publicKey) {
+        missing++;
+        continue;
+      }
+      try {
+        const ok = await verifyDetached(publicKey, token, actorSig);
+        if (!ok) {
+          failed++;
+          failures.push({ index, reason: "actor signature mismatch" });
+          continue;
+        }
+      } catch (error) {
+        failed++;
+        failures.push({
+          index,
+          reason: error instanceof Error ? error.message : "actor signature error",
+        });
+        continue;
+      }
+      verified++;
+    }
+
+    return {
+      ok: failed === 0,
+      verified,
+      failed,
+      missing,
+      failures,
     };
   }
 
@@ -679,7 +865,7 @@ export class Dacument<S extends SchemaDefinition> {
     const decodedOps: Array<{
       token: string;
       payload: OpPayload;
-      signerRole: SigningRole | null;
+      signerRole: SignerKind | null;
     }> = [];
     const accepted: SignedOp[] = [];
     let rejected = 0;
@@ -689,6 +875,7 @@ export class Dacument<S extends SchemaDefinition> {
 
     for (const item of tokens) {
       const token = typeof item === "string" ? item : item.token;
+      const actorSig = typeof item === "string" ? undefined : item.actorSig;
       const decoded = decodeToken(token);
       if (!decoded) {
         rejected++;
@@ -721,23 +908,67 @@ export class Dacument<S extends SchemaDefinition> {
         if (isUnsignedAck) {
           stored = { payload, signerRole: null };
         } else {
-          const signerRole = parseSignerRole(decoded.header.kid, payload.iss);
-          if (!signerRole) {
+          const signerKind = parseSignerKind(decoded.header.kid, payload.iss);
+          if (!signerKind) {
             rejected++;
             continue;
           }
-          const publicKey = this.roleKeys[signerRole];
-          const verified = await verifyToken(publicKey, token, TOKEN_TYP);
-          if (!verified) {
-            rejected++;
-            continue;
+          if (signerKind === "actor") {
+            if (payload.kind !== "acl.set") {
+              rejected++;
+              continue;
+            }
+            const patch = isAclPatch(payload.patch) ? payload.patch : null;
+            if (!patch || patch.target !== payload.iss) {
+              rejected++;
+              continue;
+            }
+            const wantsSelfRevoke = patch.role === "revoked";
+            const wantsKeyAttach = Boolean(patch.publicKeyJwk);
+            if (!wantsSelfRevoke && !wantsKeyAttach) {
+              rejected++;
+              continue;
+            }
+            const existingKey = this.aclLog.publicKeyAt(payload.iss, payload.stamp);
+            if (
+              existingKey &&
+              patch.publicKeyJwk &&
+              !jwkEquals(existingKey, patch.publicKeyJwk)
+            ) {
+              rejected++;
+              continue;
+            }
+            const publicKey = existingKey ?? patch.publicKeyJwk;
+            if (!publicKey) {
+              rejected++;
+              continue;
+            }
+            const verified = await verifyToken(publicKey, token, TOKEN_TYP);
+            if (!verified) {
+              rejected++;
+              continue;
+            }
+            stored = { payload, signerRole: "actor" };
+          } else {
+            const publicKey = this.roleKeys[signerKind];
+            const verified = await verifyToken(publicKey, token, TOKEN_TYP);
+            if (!verified) {
+              rejected++;
+              continue;
+            }
+            stored = { payload, signerRole: signerKind };
           }
-          stored = { payload, signerRole };
         }
         this.verifiedOps.set(token, stored);
         if (!this.opTokens.has(token)) {
           this.opTokens.add(token);
-          this.opLog.push({ token });
+          const opEntry: SignedOp = { token };
+          if (typeof actorSig === "string") {
+            opEntry.actorSig = actorSig;
+            this.actorSigByToken.set(token, actorSig);
+          }
+          this.opLog.push(opEntry);
+          this.opIndexByToken.set(token, this.opLog.length - 1);
         }
         sawNewToken = true;
         if (payload.kind === "acl.set") {
@@ -747,6 +978,7 @@ export class Dacument<S extends SchemaDefinition> {
           }
         }
       }
+      this.recordActorSig(token, actorSig);
       decodedOps.push({
         token,
         payload: stored.payload,
@@ -758,7 +990,7 @@ export class Dacument<S extends SchemaDefinition> {
     let appliedNonAck = false;
     if (sawNewToken) {
       const beforeValues = this.isRevoked() ? undefined : this.snapshotFieldValues();
-      const result = this.rebuildFromVerified(new Set(this.appliedTokens), {
+      const result = await this.rebuildFromVerified(new Set(this.appliedTokens), {
         beforeValues,
         diffActor: diffActor ?? this.actorId,
       });
@@ -785,17 +1017,18 @@ export class Dacument<S extends SchemaDefinition> {
 
     if (appliedNonAck) this.scheduleAck();
     this.maybeGc();
+    this.maybePublishActorKey();
 
     return { accepted, rejected };
   }
 
-  private rebuildFromVerified(
+  private async rebuildFromVerified(
     previousApplied: Set<string>,
     options?: {
       beforeValues?: Map<string, unknown>;
       diffActor?: string;
     }
-  ): { appliedNonAck: boolean } {
+  ): Promise<{ appliedNonAck: boolean }> {
     const invalidated = new Set(previousApplied);
     let appliedNonAck = false;
 
@@ -827,28 +1060,54 @@ export class Dacument<S extends SchemaDefinition> {
     for (const { token, payload, signerRole } of ops) {
       let allowed = false;
       if (payload.kind === "acl.set") {
-        if (!signerRole) continue;
+        const patch = isAclPatch(payload.patch) ? payload.patch : null;
+        if (!patch) continue;
         if (
           this.aclLog.isEmpty() &&
-          isAclPatch(payload.patch) &&
-          payload.patch.role === "owner" &&
-          payload.patch.target === payload.iss &&
+          patch.role === "owner" &&
+          patch.target === payload.iss &&
           signerRole === "owner"
         ) {
           allowed = true;
         } else {
           const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
+          const isSelfRevoke = patch.target === payload.iss && patch.role === "revoked";
+          const targetKey = this.aclLog.publicKeyAt(patch.target, payload.stamp);
+          const isSelfKeyUpdate =
+            patch.target === payload.iss &&
+            patch.publicKeyJwk &&
+            patch.role === roleAt &&
+            roleAt !== "revoked" &&
+            (!targetKey || jwkEquals(targetKey, patch.publicKeyJwk));
           if (
-            roleAt === signerRole &&
-            isAclPatch(payload.patch) &&
-            this.canWriteAclTarget(
-              signerRole,
-              payload.patch.role,
-              payload.patch.target,
-              payload.stamp
-            )
-          )
-            allowed = true;
+            patch.publicKeyJwk &&
+            targetKey &&
+            !jwkEquals(targetKey, patch.publicKeyJwk)
+          ) {
+            continue;
+          }
+          if (isSelfRevoke) {
+            if (signerRole === "actor") {
+              allowed = true;
+            } else if (signerRole && roleAt === signerRole) {
+              allowed = true;
+            }
+          } else if (signerRole === "actor") {
+            if (isSelfKeyUpdate) allowed = true;
+          } else if (signerRole && roleAt === signerRole) {
+            if (
+              this.canWriteAclTarget(
+                signerRole,
+                patch.role,
+                patch.target,
+                payload.stamp
+              )
+            ) {
+              allowed = true;
+            } else if (isSelfKeyUpdate) {
+              allowed = true;
+            }
+          }
         }
       } else {
         const roleAt = this.aclLog.roleAt(payload.iss, payload.stamp);
@@ -889,6 +1148,39 @@ export class Dacument<S extends SchemaDefinition> {
     }
 
     return { appliedNonAck };
+  }
+
+  private maybePublishActorKey(): void {
+    const entry = this.aclLog.currentEntry(this.actorId);
+    if (entry?.publicKeyJwk) {
+      this.actorKeyPublishPending = false;
+      return;
+    }
+    if (this.actorKeyPublishPending) return;
+    if (this.isRevoked()) return;
+    if (!entry) return;
+
+    const actorInfo = Dacument.requireActorInfo();
+    const stamp = this.clock.next();
+    const payload: OpPayload = {
+      iss: this.actorId,
+      sub: this.docId,
+      iat: nowSeconds(),
+      stamp,
+      kind: "acl.set",
+      schema: this.schemaId,
+      patch: {
+        id: uuidv7(),
+        target: this.actorId,
+        role: entry.role,
+        publicKeyJwk: actorInfo.publicKeyJwk,
+      },
+    };
+
+    this.actorKeyPublishPending = true;
+    this.queueActorOp(payload, () => {
+      this.actorKeyPublishPending = false;
+    });
   }
 
   private ack(): void {
@@ -1682,8 +1974,9 @@ export class Dacument<S extends SchemaDefinition> {
     const header = { alg: "ES256", typ: TOKEN_TYP, kid: `${payload.iss}:${role}` } as const;
 
     const promise = signToken(this.roleKey, header, payload)
-      .then((token) => {
-        const op = { token };
+      .then(async (token) => {
+        const actorSig = await Dacument.signActorToken(token);
+        const op = { token, actorSig };
         this.emitEvent("change", { type: "change", ops: [op] });
       })
       .catch((error) =>
@@ -1694,7 +1987,33 @@ export class Dacument<S extends SchemaDefinition> {
     promise.finally(() => this.pending.delete(promise));
   }
 
-  private applyRemotePayload(payload: OpPayload, signerRole: Role | null): boolean {
+  private queueActorOp(payload: OpPayload, onError?: () => void): void {
+    const actorInfo = Dacument.requireActorInfo();
+    const header = {
+      alg: "ES256",
+      typ: TOKEN_TYP,
+      kid: `${payload.iss}:actor`,
+    } as const;
+
+    const promise = signToken(actorInfo.privateKeyJwk, header, payload)
+      .then(async (token) => {
+        const actorSig = await Dacument.signActorToken(token);
+        const op = { token, actorSig };
+        this.emitEvent("change", { type: "change", ops: [op] });
+      })
+      .catch((error) => {
+        onError?.();
+        this.emitError(error instanceof Error ? error : new Error(String(error)));
+      });
+
+    this.pending.add(promise);
+    promise.finally(() => this.pending.delete(promise));
+  }
+
+  private applyRemotePayload(
+    payload: OpPayload,
+    signerRole: SignerKind | null
+  ): boolean {
     this.clock.observe(payload.stamp);
 
     if (payload.kind === "ack") {
@@ -1703,11 +2022,14 @@ export class Dacument<S extends SchemaDefinition> {
       return true;
     }
 
-    if (!signerRole) return false;
-
     if (payload.kind === "acl.set") {
+      if (!signerRole) return false;
+      if (signerRole === "actor")
+        return this.applyAclPayload(payload, null, { skipAuth: true });
       return this.applyAclPayload(payload, signerRole);
     }
+
+    if (!signerRole || signerRole === "actor") return false;
 
     if (!payload.field) return false;
     const state = this.fields.get(payload.field);
@@ -1727,13 +2049,20 @@ export class Dacument<S extends SchemaDefinition> {
     }
   }
 
-  private applyAclPayload(payload: OpPayload, signerRole: Role): boolean {
+  private applyAclPayload(
+    payload: OpPayload,
+    signerRole: Role | null,
+    options?: { skipAuth?: boolean }
+  ): boolean {
     if (!isAclPatch(payload.patch)) return false;
     const patch = payload.patch;
-    if (
-      !this.canWriteAclTarget(signerRole, patch.role, patch.target, payload.stamp)
-    )
-      return false;
+    if (!options?.skipAuth) {
+      if (!signerRole) return false;
+      if (
+        !this.canWriteAclTarget(signerRole, patch.role, patch.target, payload.stamp)
+      )
+        return false;
+    }
 
     const assignment: AclAssignment = {
       id: patch.id,
@@ -1741,6 +2070,7 @@ export class Dacument<S extends SchemaDefinition> {
       role: patch.role,
       stamp: payload.stamp,
       by: payload.iss,
+      publicKeyJwk: patch.publicKeyJwk,
     };
 
     const accepted = this.aclLog.merge(assignment);

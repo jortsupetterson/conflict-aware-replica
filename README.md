@@ -19,10 +19,16 @@ yarn add dacument
 
 ```ts
 import { generateNonce } from "bytecodec";
+import { generateSignPair } from "zeyra";
 import { Dacument } from "dacument";
 
 const actorId = generateNonce(); // 256-bit base64url id
-Dacument.setActorId(actorId);
+const actorKeys = await generateSignPair();
+await Dacument.setActorInfo({
+  id: actorId,
+  privateKeyJwk: actorKeys.signingJwk,
+  publicKeyJwk: actorKeys.verificationJwk,
+});
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/i }),
@@ -93,9 +99,11 @@ doc.acl.setRole("user-viewer", "viewer");
 await doc.flush();
 ```
 
-Before any schema/load/create, call `Dacument.setActorId()` once per process.
-The actor id must be a 256-bit base64url string (e.g. `bytecodec.generateNonce()`).
-Subsequent calls are ignored.
+Before any schema/load/create, call `await Dacument.setActorInfo(...)` once per
+process. The actor id must be a 256-bit base64url string (e.g.
+`bytecodec` libarys `generateNonce()`), and the actor key pair must be ES256 (P-256).
+Subsequent calls are ignored. On first merge, Dacument auto-attaches the
+actor's `publicKeyJwk` to its own ACL entry (if missing).
 
 Each actor signs with the role key they were given (owner/manager/editor). Load
 with the highest role key you have; viewers load without a key.
@@ -123,7 +131,12 @@ without snapshotting.
 To add a new replica, share a snapshot and load it:
 
 ```ts
-Dacument.setActorId(bobId);
+const bobKeys = await generateSignPair();
+await Dacument.setActorInfo({
+  id: bobId,
+  privateKeyJwk: bobKeys.signingJwk,
+  publicKeyJwk: bobKeys.verificationJwk,
+});
 const bob = await Dacument.load({
   schema,
   roleKey: bobKey.privateKey,
@@ -139,9 +152,19 @@ Snapshots do not include schema or schema ids; callers must supply the schema on
 - `doc.addEventListener("merge", handler)` emits `{ actor, target, method, data }`.
 - `doc.addEventListener("error", handler)` emits signing/verification errors.
 - `doc.addEventListener("revoked", handler)` fires when the current actor is revoked.
+- `doc.selfRevoke()` emits a signed ACL op that revokes the current actor.
 - `await doc.flush()` waits for pending signatures so all local ops are emitted.
 - `doc.snapshot()` returns a loadable op log (`{ docId, roleKeys, ops }`).
+- `await doc.verifyActorIntegrity(...)` verifies per-actor signatures on demand.
 - Revoked actors cannot snapshot; reads are masked to initial values.
+
+## Actor identity (cold path)
+
+Every op may include an `actorSig` (detached ES256 signature over the op token).
+Merges ignore `actorSig` by default to keep the hot path fast. When you need
+attribution or forensic checks, call `verifyActorIntegrity()` with a token,
+ops list, or snapshot. It verifies `actorSig` against the actor's `publicKeyJwk`
+from the ACL at the op stamp and returns a summary plus failures.
 
 ## Garbage collection
 

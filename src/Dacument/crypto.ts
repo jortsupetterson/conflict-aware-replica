@@ -13,6 +13,8 @@ type DecodedToken = {
   payloadB64: string;
 };
 
+const ACTOR_CHALLENGE = Bytes.fromString("dacument-actor-verify");
+
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value))
@@ -30,6 +32,12 @@ function decodePart(part: string): unknown {
   const bytes = Bytes.fromBase64UrlString(part);
   const json = Bytes.toString(bytes);
   return JSON.parse(json);
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
 }
 
 export async function signToken(
@@ -82,6 +90,39 @@ export async function verifyToken(
   const verifier = new VerificationAgent(publicJwk);
   const signingInput = Bytes.fromString(`${headerB64}.${payloadB64}`);
   const signatureBytes = new Uint8Array(signature);
-  const ok = await verifier.verify(signingInput, signatureBytes.buffer);
+  const ok = await verifier.verify(signingInput, toArrayBuffer(signatureBytes));
   return ok ? { header, payload } : false;
+}
+
+export async function validateActorKeyPair(
+  privateJwk: JsonWebKey,
+  publicJwk: JsonWebKey
+): Promise<void> {
+  const signer = new SigningAgent(privateJwk);
+  const signatureBytes = new Uint8Array(await signer.sign(ACTOR_CHALLENGE));
+  const verifier = new VerificationAgent(publicJwk);
+  const ok = await verifier.verify(ACTOR_CHALLENGE, toArrayBuffer(signatureBytes));
+  if (!ok)
+    throw new Error(
+      "Dacument.setActorInfo: publicKeyJwk does not match privateKeyJwk"
+    );
+}
+
+export async function signDetached(
+  privateJwk: JsonWebKey,
+  payload: string
+): Promise<string> {
+  const signer = new SigningAgent(privateJwk);
+  const signature = await signer.sign(Bytes.fromString(payload));
+  return Bytes.toBase64UrlString(signature);
+}
+
+export async function verifyDetached(
+  publicJwk: JsonWebKey,
+  payload: string,
+  signatureB64: string
+): Promise<boolean> {
+  const verifier = new VerificationAgent(publicJwk);
+  const signatureBytes = Bytes.fromBase64UrlString(signatureB64);
+  return verifier.verify(Bytes.fromString(payload), toArrayBuffer(signatureBytes));
 }

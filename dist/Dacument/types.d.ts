@@ -27,6 +27,11 @@ export type RolePublicKeys = {
     manager: JsonWebKey;
     editor: JsonWebKey;
 };
+export type ActorInfo = {
+    id: string;
+    privateKeyJwk: JsonWebKey;
+    publicKeyJwk: JsonWebKey;
+};
 export type RegisterSchema<T extends JsTypeName = JsTypeName> = {
     crdt: "register";
     jsType: T;
@@ -77,6 +82,7 @@ export type OpPayload = {
 };
 export type SignedOp = {
     token: string;
+    actorSig?: string;
 };
 export type DacumentChangeEvent = {
     type: "change";
@@ -112,6 +118,23 @@ export type AclAssignment = {
     role: Role;
     stamp: HLCStamp;
     by: string;
+    publicKeyJwk?: JsonWebKey;
+};
+export type VerifyActorIntegrityOptions = {
+    token?: string | SignedOp;
+    ops?: Array<string | SignedOp>;
+    snapshot?: DocSnapshot;
+};
+export type VerificationFailure = {
+    index: number;
+    reason: string;
+};
+export type VerificationResult = {
+    ok: boolean;
+    verified: number;
+    failed: number;
+    missing: number;
+    failures: VerificationFailure[];
 };
 export type DocSnapshot = {
     docId: string;

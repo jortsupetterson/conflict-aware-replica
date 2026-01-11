@@ -55,6 +55,19 @@ export class AclLog {
     currentEntry(actorId) {
         return this.currentByActor.get(actorId) ?? null;
     }
+    publicKeyAt(actorId, stamp) {
+        const list = this.nodesByActor.get(actorId);
+        if (!list || list.length === 0)
+            return null;
+        for (let index = list.length - 1; index >= 0; index--) {
+            const entry = list[index];
+            if (compareHLC(entry.stamp, stamp) > 0)
+                continue;
+            if (entry.publicKeyJwk)
+                return entry.publicKeyJwk;
+        }
+        return null;
+    }
     knownActors() {
         return [...this.currentByActor.keys()];
     }

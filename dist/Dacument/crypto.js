@@ -1,5 +1,6 @@
 import { Bytes } from "bytecodec";
 import { SigningAgent, VerificationAgent } from "zeyra";
+const ACTOR_CHALLENGE = Bytes.fromString("dacument-actor-verify");
 function stableStringify(value) {
     if (value === null || typeof value !== "object")
         return JSON.stringify(value);
@@ -15,6 +16,11 @@ function decodePart(part) {
     const bytes = Bytes.fromBase64UrlString(part);
     const json = Bytes.toString(bytes);
     return JSON.parse(json);
+}
+function toArrayBuffer(bytes) {
+    const buffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(buffer).set(bytes);
+    return buffer;
 }
 export async function signToken(privateJwk, header, payload) {
     const headerJson = stableStringify(header);
@@ -59,6 +65,24 @@ export async function verifyToken(publicJwk, token, expectedTyp) {
     const verifier = new VerificationAgent(publicJwk);
     const signingInput = Bytes.fromString(`${headerB64}.${payloadB64}`);
     const signatureBytes = new Uint8Array(signature);
-    const ok = await verifier.verify(signingInput, signatureBytes.buffer);
+    const ok = await verifier.verify(signingInput, toArrayBuffer(signatureBytes));
     return ok ? { header, payload } : false;
+}
+export async function validateActorKeyPair(privateJwk, publicJwk) {
+    const signer = new SigningAgent(privateJwk);
+    const signatureBytes = new Uint8Array(await signer.sign(ACTOR_CHALLENGE));
+    const verifier = new VerificationAgent(publicJwk);
+    const ok = await verifier.verify(ACTOR_CHALLENGE, toArrayBuffer(signatureBytes));
+    if (!ok)
+        throw new Error("Dacument.setActorInfo: publicKeyJwk does not match privateKeyJwk");
+}
+export async function signDetached(privateJwk, payload) {
+    const signer = new SigningAgent(privateJwk);
+    const signature = await signer.sign(Bytes.fromString(payload));
+    return Bytes.toBase64UrlString(signature);
+}
+export async function verifyDetached(publicJwk, payload, signatureB64) {
+    const verifier = new VerificationAgent(publicJwk);
+    const signatureBytes = Bytes.fromBase64UrlString(signatureB64);
+    return verifier.verify(Bytes.fromString(payload), toArrayBuffer(signatureBytes));
 }

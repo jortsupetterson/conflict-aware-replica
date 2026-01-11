@@ -11,6 +11,7 @@ export declare class AclLog {
     roleAt(actorId: string, stamp: AclAssignment["stamp"]): Role;
     currentRole(actorId: string): Role;
     currentEntry(actorId: string): AclAssignment | null;
+    publicKeyAt(actorId: string, stamp: AclAssignment["stamp"]): JsonWebKey | null;
     knownActors(): string[];
     private insert;
 }

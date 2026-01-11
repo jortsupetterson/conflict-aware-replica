@@ -8,10 +8,16 @@ for register fields and CRDT views for all other field types.
 
 ```ts
 import { generateNonce } from "bytecodec";
+import { generateSignPair } from "zeyra";
 import { Dacument } from "dacument";
 
 const actorId = generateNonce(); // 256-bit base64url id
-Dacument.setActorId(actorId);
+const actorKeys = await generateSignPair();
+await Dacument.setActorInfo({
+  id: actorId,
+  privateKeyJwk: actorKeys.signingJwk,
+  publicKeyJwk: actorKeys.verificationJwk,
+});
 
 const schema = Dacument.schema({
   title: Dacument.register({ jsType: "string", regex: /^[a-z ]+$/i }),
@@ -37,8 +43,9 @@ const doc = await Dacument.load({
 `create()` generates a `docId` and role keys, and returns a snapshot. Load the
 document with the highest role key you have (viewers load without a key).
 Snapshots do not include schema or schema ids; the caller must provide the schema.
-Call `Dacument.setActorId()` once per process before creating schemas or loading.
-Subsequent calls are ignored.
+Call `await Dacument.setActorInfo(...)` once per process before creating schemas
+or loading. Subsequent calls are ignored. On first merge, Dacument auto-attaches
+the actor's `publicKeyJwk` to its ACL entry (if missing).
 
 `roleKeys` includes owner/manager/editor key pairs; store and distribute them
 as needed.
@@ -64,7 +71,9 @@ Managers cannot change owner actors.
 - `doc.addEventListener("merge", handler)` emits `{ actor, target, method, data }`.
 - `doc.addEventListener("error", handler)` emits signing/verification errors.
 - `doc.addEventListener("revoked", handler)` fires when the current actor is revoked.
+- `doc.selfRevoke()` emits a signed ACL op that revokes the current actor.
 - `doc.snapshot()` returns a loadable op log (`{ docId, roleKeys, ops }`).
+- `await doc.verifyActorIntegrity(...)` verifies per-actor signatures on demand.
 
 Map keys must be JSON-compatible values. For string-keyed data, prefer `record`.
 
