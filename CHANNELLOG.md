@@ -1,5 +1,12 @@
 # Channel Log
 
+## 1.2.2
+
+- Make `computeSchemaId` private to keep the public API surface tighter.
+- Add `noImplicitReturns` to strengthen TypeScript checking.
+- Align record mutation helper returns with other CRDT helpers.
+- Document which type-safety refactors were deferred and why.
+
 ## 1.2.1
 
 - Speed up CRArray/CRText indexing, writes, and slices by reducing allocations and sort overhead.

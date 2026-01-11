@@ -1818,7 +1818,7 @@ export class Dacument {
         const shadow = this.shadowFor(field, state);
         const { patches, result } = this.capturePatches((listener) => shadow.onChange(listener), () => mutate(shadow));
         if (patches.length === 0)
-            return;
+            return result;
         this.queueLocalOp({
             iss: this.actorId,
             sub: this.docId,

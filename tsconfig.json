@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "types": ["node"],
     "forceConsistentCasingInFileNames": true,
-    "noEmitOnError": true
+    "noEmitOnError": true,
+    "noImplicitReturns": true
   },
   "include": ["src/**/*.ts"]
 }

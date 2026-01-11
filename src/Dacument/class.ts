@@ -2139,7 +2139,7 @@ export class Dacument<S extends SchemaDefinition> {
       (listener) => shadow.onChange(listener),
       () => mutate(shadow)
     );
-    if (patches.length === 0) return;
+    if (patches.length === 0) return result;
     this.queueLocalOp(
       {
         iss: this.actorId,
