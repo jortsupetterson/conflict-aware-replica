@@ -1,7 +1,7 @@
 # CRRecord
 
 CRRecord is an observed-remove record (OR-Record) for string-keyed fields. Each
-`set` adds a unique tag, deletes tombstone the tags they observed, and the
+`set` adds a unique tag. Delete ops tombstone the tags they observed. The
 highest surviving tag id wins per field so replicas converge deterministically.
 
 ## API
@@ -11,7 +11,7 @@ highest surviving tag id wins per field so replicas converge deterministically.
 - `merge(snapshotOrNode): CRRecordNode<V>[]` accepts a snapshot array or single
   node patch and returns the accepted nodes.
 - Record operations: `record[key] = value`, `delete record[key]`, `key in record`,
-  and `Object.keys(record)` via Proxy.
+  and `Object.keys(record)` via Proxy traps.
 
 ## How it works
 
@@ -57,7 +57,8 @@ console.log(alice.title, bob.title); // same winner by tag id
 
 ## Benchmarks
 
-`npm run bench:crrecord` runs `bench/crrecord.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crrecord.bench.js`.
 
 You can tune the run with environment variables:
 

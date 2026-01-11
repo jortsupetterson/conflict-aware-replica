@@ -1,7 +1,7 @@
 # CRSet
 
 CRSet is an observed-remove set (OR-Set) that converges across replicas. Each
-`add` creates a unique tag, and `delete` tombstones the tags it observed.
+`add` creates a unique tag. Delete ops tombstone the tags they observed.
 
 ## API
 
@@ -17,7 +17,7 @@ CRSet is an observed-remove set (OR-Set) that converges across replicas. Each
 - `add(value)` emits an `add` node tagged with a unique id.
 - `delete(value)` emits a `rem` node that tombstones the currently observed tags.
 - `merge(snapshotOrNode)` unions nodes by id, so concurrent writes converge.
-- If multiple adds share the same key, the highest tag id wins the returned
+- If multiple adds share the same key, the highest tag id wins the visible
   value.
 
 ## Value identity
@@ -64,7 +64,8 @@ console.log([...alice]); // same elements as bob
 
 ## Benchmarks
 
-`npm run bench:crset` runs `bench/crset.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crset.bench.js`.
 
 You can tune the run with environment variables:
 

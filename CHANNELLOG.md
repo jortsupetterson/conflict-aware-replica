@@ -1,5 +1,11 @@
 # Channel Log
 
+## 1.2.1
+
+- Speed up CRArray/CRText indexing, writes, and slices by reducing allocations and sort overhead.
+- Clarify actor-signed acks, ACL-pinned actor keys, and map key constraints in docs.
+- Align CRDT README benchmark commands with `npm run bench` and direct bench scripts.
+
 ## 1.2.0
 
 - Add access reset flow with signed reset ops and reset events.

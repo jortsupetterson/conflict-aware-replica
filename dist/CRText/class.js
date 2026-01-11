@@ -1,11 +1,13 @@
 import { DAGNode } from "../DAGNode/class.js";
 const ROOT = [];
 function afterKey(after) {
-    return after.join(",");
+    return after.length < 2 ? (after[0] ?? "") : after.join(",");
 }
 export class CRText {
     nodes = [];
     nodeById = new Map();
+    aliveCount = 0;
+    lastAliveIndex = -1;
     listeners = new Set();
     constructor(snapshot) {
         if (snapshot) {
@@ -14,16 +16,14 @@ export class CRText {
                     continue;
                 this.nodes.push(node);
                 this.nodeById.set(node.id, node);
+                if (!node.deleted)
+                    this.aliveCount++;
             }
         }
         this.sort();
     }
     get length() {
-        let count = 0;
-        for (const node of this.nodes)
-            if (!node.deleted)
-                count++;
-        return count;
+        return this.aliveCount;
     }
     // --- public API ---
     onChange(listener) {
@@ -41,19 +41,41 @@ export class CRText {
         return output;
     }
     at(index) {
-        return this.alive().at(index);
+        let target = Math.trunc(Number(index));
+        if (Number.isNaN(target))
+            target = 0;
+        if (target < 0)
+            target = this.length + target;
+        if (target < 0)
+            return undefined;
+        let aliveIndex = 0;
+        for (const node of this.nodes) {
+            if (node.deleted)
+                continue;
+            if (aliveIndex === target)
+                return node.value;
+            aliveIndex++;
+        }
+        return undefined;
     }
     insertAt(index, char) {
         if (!Number.isInteger(index))
             throw new TypeError("CRText.insertAt: index must be an integer");
         if (index < 0)
             throw new RangeError("CRText.insertAt: negative index not supported");
-        if (index > this.length)
+        const length = this.aliveCount;
+        if (index > length)
             throw new RangeError("CRText.insertAt: index out of bounds");
-        const after = this.afterIdForAliveInsertAt(index);
+        const lastAliveId = this.lastAliveId();
+        const after = index === length
+            ? lastAliveId
+                ? [lastAliveId]
+                : ROOT
+            : this.afterIdForAliveInsertAt(index);
         const node = new DAGNode({ value: char, after });
         this.nodes.push(node);
         this.nodeById.set(node.id, node);
+        this.aliveCount++;
         this.sort();
         this.emit([node]);
         return this;
@@ -64,11 +86,23 @@ export class CRText {
         if (index < 0)
             throw new RangeError("CRText.deleteAt: negative index not supported");
         let aliveIndex = 0;
-        for (const node of this.nodes) {
+        for (let idx = 0; idx < this.nodes.length; idx++) {
+            const node = this.nodes[idx];
             if (node.deleted)
                 continue;
             if (aliveIndex === index) {
                 node.deleted = true;
+                this.aliveCount--;
+                if (this.aliveCount === 0) {
+                    this.lastAliveIndex = -1;
+                }
+                else if (idx === this.lastAliveIndex) {
+                    this.lastAliveIndex = idx - 1;
+                    while (this.lastAliveIndex >= 0 &&
+                        this.nodes[this.lastAliveIndex].deleted) {
+                        this.lastAliveIndex--;
+                    }
+                }
                 this.emit([node]);
                 return node.value;
             }
@@ -87,10 +121,13 @@ export class CRText {
                 const clone = structuredClone(remote);
                 this.nodes.push(clone);
                 this.nodeById.set(clone.id, clone);
+                if (!clone.deleted)
+                    this.aliveCount++;
                 changed.push(clone);
             }
             else if (!local.deleted && remote.deleted) {
                 local.deleted = true;
+                this.aliveCount--;
                 changed.push(local);
             }
         }
@@ -103,6 +140,7 @@ export class CRText {
     sort(compareFn) {
         if (compareFn) {
             this.nodes.sort(compareFn);
+            this.recomputeLastAliveIndex();
             return this;
         }
         this.nodes.sort((left, right) => {
@@ -120,16 +158,10 @@ export class CRText {
                 return left.id > right.id ? -1 : 1;
             return left.id < right.id ? -1 : 1;
         });
+        this.recomputeLastAliveIndex();
         return this;
     }
     // --- internals ---
-    alive() {
-        const values = [];
-        for (const node of this.nodes)
-            if (!node.deleted)
-                values.push(node.value);
-        return values;
-    }
     afterIdForAliveInsertAt(index) {
         if (index === 0)
             return ROOT;
@@ -146,6 +178,27 @@ export class CRText {
         if (previousAliveId)
             return [previousAliveId];
         return ROOT;
+    }
+    lastAliveId() {
+        if (this.lastAliveIndex < 0)
+            return null;
+        const node = this.nodes[this.lastAliveIndex];
+        if (!node || node.deleted) {
+            this.recomputeLastAliveIndex();
+            if (this.lastAliveIndex < 0)
+                return null;
+            return this.nodes[this.lastAliveIndex].id;
+        }
+        return node.id;
+    }
+    recomputeLastAliveIndex() {
+        for (let index = this.nodes.length - 1; index >= 0; index--) {
+            if (!this.nodes[index].deleted) {
+                this.lastAliveIndex = index;
+                return;
+            }
+        }
+        this.lastAliveIndex = -1;
     }
     emit(nodes) {
         if (nodes.length === 0)

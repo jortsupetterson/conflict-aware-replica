@@ -2,6 +2,8 @@ import { DAGNode } from "../DAGNode/class.js";
 export declare class CRArray<T> {
     private readonly nodes;
     private readonly nodeById;
+    private aliveCount;
+    private lastAliveIndex;
     private readonly listeners;
     constructor(snapshot?: readonly DAGNode<T>[]);
     get length(): number;
@@ -29,6 +31,7 @@ export declare class CRArray<T> {
     sort(compareFn?: (a: DAGNode<T>, b: DAGNode<T>) => number): this;
     private alive;
     private lastAliveId;
+    private recomputeLastAliveIndex;
     private afterIdForAliveInsertAt;
     private emit;
 }

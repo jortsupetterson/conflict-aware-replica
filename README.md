@@ -51,6 +51,7 @@ doc.body.insertAt(0, "H");
 doc.tags.add("draft");
 doc.items.push("milk");
 
+// Wire ops to your transport.
 doc.addEventListener("change", (event) => channel.send(event.ops));
 channel.onmessage = (ops) => doc.merge(ops);
 
@@ -60,13 +61,13 @@ doc.addEventListener("merge", ({ actor, target, method, data }) => {
 ```
 
 `create()` returns `roleKeys` for owner/manager/editor; store them securely and
-distribute the highest role key per actor as needed.
+distribute the highest role key each actor should hold.
 
 ## Schema and fields
 
 - `register` fields behave like normal properties: `doc.title = "hi"`.
 - Other fields return safe CRDT views: `doc.items.push("x")`.
-- Unknown fields and schema bypasses throw.
+- Unknown fields or schema bypasses throw.
 - UI updates should listen to `merge` events.
 
 Supported CRDT field types:
@@ -78,7 +79,9 @@ Supported CRDT field types:
 - `map` - OR-Map.
 - `record` - OR-Record.
 
-Map keys must be JSON-compatible values (`string`, `number`, `boolean`, `null`, arrays, or objects). For string-keyed data, prefer `record`.
+Map keys must be JSON-compatible values (`string`, `number`, `boolean`, `null`,
+arrays, or objects). For string-keyed data, prefer `record`. For non-JSON or
+identity-based keys, use `CRMap` with a stable `key` function.
 
 ## Roles and ACL
 
@@ -101,16 +104,17 @@ await doc.flush();
 
 Before any schema/load/create, call `await Dacument.setActorInfo(...)` once per
 process. The actor id must be a 256-bit base64url string (e.g.
-`bytecodec` libarys `generateNonce()`), and the actor key pair must be ES256 (P-256).
+`bytecodec` library's `generateNonce()`), and the actor key pair must be ES256 (P-256).
 Updating actor info requires providing the current keys. On first merge, Dacument
-auto-attaches the actor's `publicKeyJwk` to its own ACL entry (if missing).
-To rotate actor keys in-process, call `Dacument.setActorInfo` again with the new
-keys plus `currentPrivateKeyJwk`/`currentPublicKeyJwk`.
+auto-attaches the actor's `publicKeyJwk` to its own ACL entry (if missing) and
+pins it for actor-signature verification. To rotate actor keys in-process, call
+`Dacument.setActorInfo` again with the new keys plus
+`currentPrivateKeyJwk`/`currentPublicKeyJwk`.
 
-Each actor signs with the role key they were given (owner/manager/editor). Load
-with the highest role key you have; viewers load without a key.
-Role keys are generated once at `create()`; public keys are embedded in the
-snapshot and never rotated.
+Write ops are role-signed; acks are actor-signed with the per-actor key set via
+`setActorInfo`. Load with the highest role key you have; viewers load without a
+key. Role keys are generated once at `create()`; role public keys are embedded
+in the snapshot and never rotated.
 
 ## Networking and sync
 
@@ -146,17 +150,19 @@ const bob = await Dacument.load({
 });
 ```
 
-Snapshots do not include schema or schema ids; callers must supply the schema on load.
+Snapshots do not include the schema or schema ids; callers must supply the schema on load.
 
 ## Events and values
 
-- `doc.addEventListener("change", handler)` emits ops for network sync (writer ops are signed; acks are actor-signed).
+- `doc.addEventListener("change", handler)` emits ops for network sync
+  (writer ops are role-signed; acks are actor-signed by non-revoked actors and
+  verified against ACL-pinned actor public keys).
 - `doc.addEventListener("merge", handler)` emits `{ actor, target, method, data }`.
 - `doc.addEventListener("error", handler)` emits signing/verification errors.
 - `doc.addEventListener("revoked", handler)` fires when the current actor is revoked.
 - `doc.addEventListener("reset", handler)` emits `{ oldDocId, newDocId, ts, by, reason }`.
 - `doc.selfRevoke()` emits a signed ACL op that revokes the current actor.
-- `await doc.accessReset({ reason })` creates a new dacument with fresh keys and emits a reset op.
+- `await doc.accessReset({ reason })` creates a new Dacument with fresh keys and emits a reset op.
 - `doc.getResetState()` returns reset metadata (or `null`).
 - `await doc.flush()` waits for pending signatures so all local ops are emitted.
 - `doc.snapshot()` returns a loadable op log (`{ docId, roleKeys, ops }`).
@@ -166,14 +172,14 @@ Snapshots do not include schema or schema ids; callers must supply the schema on
 ## Access reset (key compromise response)
 
 If an owner suspects role key compromise, call `accessReset()` to fork to a new
-doc id and revoke the old one:
+docId and revoke the old one:
 
 ```ts
 const { newDoc, oldDocOps, newDocSnapshot, roleKeys } =
   await doc.accessReset({ reason: "suspected compromise" });
 ```
 
-`accessReset()` materializes the current state into a new dacument with fresh
+`accessReset()` materializes the current state into a new Dacument with fresh
 role keys, emits a signed `reset` op for the old doc, and returns the new
 snapshot + keys. The reset is stored as a CRDT op so all replicas converge. Once
 reset, the old doc rejects any ops after the reset stamp and throws on writes:
@@ -195,16 +201,16 @@ from the ACL at the op stamp and returns a summary plus failures.
 Dacument tracks per-actor `ack` ops and compacts tombstones once all non-revoked
 actors (including viewers) have acknowledged a given HLC. Acks are emitted
 automatically after merges that apply new non-ack ops. Acks are ES256 actor-signed
-and accepted only if the actor public key is present in the ACL.
+by non-revoked actors and verified against ACL-pinned actor public keys.
 If any non-revoked actor is offline and never acks, tombstones are kept.
 
 ## Guarantees
 
 - Schema enforcement is strict; unknown fields are rejected.
-- Ops are accepted only if the CRDT patch is valid and the signature verifies
-  (acks require actor signatures).
+- Ops are accepted only if the CRDT patch is valid and the role signature
+  verifies; acks require a valid actor signature.
 - Role checks are applied at the op stamp time (HLC).
-- IDs are base64url nonces from `bytecodec` librarys `generateNonce()` (32 random bytes).
+- IDs are base64url nonces from `bytecodec` library's `generateNonce()` (32 random bytes).
 - Private keys are returned by `create()` and never stored by Dacument.
 - Snapshots may include ops that are rejected; invalid ops are ignored on load.
 
@@ -213,8 +219,9 @@ replicas. Dacument does not provide transport; use `change` events to wire it up
 
 ## Possible threats and how to handle
 
-- Key compromise: no rotation exists, so migrate by snapshotting into a new
-  dacument with fresh keys.
+- Role key compromise: role keys cannot be rotated; use `accessReset` or
+  snapshot into a new Dacument with fresh keys. Actor keys can be rotated by
+  providing the current keys.
 - Shared role keys: attribution is role-level, not per-user; treat roles as
   trust groups and log merge events if you need auditing.
 - Insider DoS/flooding: rate-limit ops, cap payload sizes, and monitor merge

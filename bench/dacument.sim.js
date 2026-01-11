@@ -80,6 +80,7 @@ if (isMainThread) {
   const ownerOps = [];
   let ownerDispatching = false;
   let lastOpAt = Date.now();
+  const pendingMerges = new Set();
 
   const noteOp = () => {
     lastOpAt = Date.now();
@@ -145,7 +146,12 @@ if (isMainThread) {
   function onMessage(id, msg) {
     if (msg.type === "ops") {
       noteOp();
-      doc.merge(msg.ops).then(() => relay(id, msg.ops));
+      const mergePromise = doc
+        .merge(msg.ops)
+        .then(() => relay(id, msg.ops))
+        .catch((err) => console.error("merge error", err));
+      pendingMerges.add(mergePromise);
+      mergePromise.finally(() => pendingMerges.delete(mergePromise));
       return;
     }
     if (msg.type === "state") {
@@ -174,6 +180,8 @@ if (isMainThread) {
     finalizeRequested = true;
     await doc.flush();
     await waitForQuiet();
+    while (pendingMerges.size > 0)
+      await Promise.allSettled([...pendingMerges]);
     const snapshot = doc.snapshot();
     for (const worker of workers.values())
       worker.postMessage({ type: "finalize", snapshot });

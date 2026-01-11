@@ -2,8 +2,10 @@ export function isJsValue(value) {
     if (value === null)
         return true;
     const valueType = typeof value;
-    if (valueType === "string" || valueType === "number" || valueType === "boolean")
+    if (valueType === "string" || valueType === "boolean")
         return true;
+    if (valueType === "number")
+        return Number.isFinite(value);
     if (Array.isArray(value))
         return value.every(isJsValue);
     if (valueType === "object") {

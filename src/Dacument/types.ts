@@ -315,8 +315,8 @@ export type DocFieldAccess<S extends SchemaDefinition> = {
 export function isJsValue(value: unknown): value is JsValue {
   if (value === null) return true;
   const valueType = typeof value;
-  if (valueType === "string" || valueType === "number" || valueType === "boolean")
-    return true;
+  if (valueType === "string" || valueType === "boolean") return true;
+  if (valueType === "number") return Number.isFinite(value);
   if (Array.isArray(value)) return value.every(isJsValue);
   if (valueType === "object") {
     for (const entry of Object.values(value as Record<string, unknown>)) {

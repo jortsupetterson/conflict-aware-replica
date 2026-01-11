@@ -23,7 +23,7 @@ nodes with tombstones so replicas can merge without conflicts.
 
 - Strings are immutable; CRText keeps a history of edits.
 - Deletes keep tombstones, so memory grows until you compact.
-- Random access (`at`) rebuilds the live view, so repeated indexing is O(n).
+- Random access (`at`) scans live nodes, so repeated indexing is O(n).
 
 ## Complexity notes
 
@@ -59,7 +59,8 @@ console.log(alice.toString()); // same as bob, deterministic order
 
 ## Benchmarks
 
-`npm run bench:crtext` runs `bench/crtext.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crtext.bench.js`.
 
 You can tune the run with environment variables:
 

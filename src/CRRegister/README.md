@@ -56,7 +56,8 @@ stop();
 
 ## Benchmarks
 
-`npm run bench:crregister` runs `bench/crregister.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crregister.bench.js`.
 
 You can tune the run with environment variables:
 

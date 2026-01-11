@@ -1,7 +1,7 @@
 {
   "name": "dacument",
-  "version": "1.2.0",
-  "description": "Schema-driven CRDT document with signed ops, role-based ACLs, and optional per-actor verification.",
+  "version": "1.2.1",
+  "description": "Schema-driven CRDT document with signed ops, role-based ACLs, and per-actor auditability.",
   "keywords": [
     "crdt",
     "document",

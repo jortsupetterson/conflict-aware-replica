@@ -2,6 +2,8 @@ import { DAGNode } from "../DAGNode/class.js";
 export declare class CRText<CharT extends string = string> {
     private readonly nodes;
     private readonly nodeById;
+    private aliveCount;
+    private lastAliveIndex;
     private readonly listeners;
     constructor(snapshot?: readonly DAGNode<CharT>[]);
     get length(): number;
@@ -13,7 +15,8 @@ export declare class CRText<CharT extends string = string> {
     deleteAt(index: number): CharT | undefined;
     merge(remoteSnapshot: DAGNode<CharT>[] | DAGNode<CharT>): DAGNode<CharT>[];
     sort(compareFn?: (a: DAGNode<CharT>, b: DAGNode<CharT>) => number): this;
-    private alive;
     private afterIdForAliveInsertAt;
+    private lastAliveId;
+    private recomputeLastAliveIndex;
     private emit;
 }

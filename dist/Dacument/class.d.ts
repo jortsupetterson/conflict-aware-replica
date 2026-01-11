@@ -25,7 +25,7 @@ export declare class Dacument<S extends SchemaDefinition> {
     static set: typeof set;
     static map: typeof map;
     static record: typeof record;
-    static computeSchemaId(schema: SchemaDefinition): Promise<SchemaId>;
+    private static computeSchemaId;
     static create<Schema extends SchemaDefinition>(params: {
         schema: Schema;
         docId?: string;

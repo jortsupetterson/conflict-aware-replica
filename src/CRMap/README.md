@@ -1,7 +1,7 @@
 # CRMap
 
 CRMap is an observed-remove map (OR-Map) that converges across replicas. Each
-`set` creates a unique tag, and deletes tombstone the tags they observed.
+`set` creates a unique tag. Delete ops tombstone the tags they observed.
 
 ## API
 
@@ -25,6 +25,7 @@ CRMap is an observed-remove map (OR-Map) that converges across replicas. Each
 By default, primitive keys get stable string ids. Objects and symbols use
 replica-local identity, so for distributed use you should provide `key` in the
 constructor to map keys to a stable string.
+Dacument's `map` field type further restricts keys to JSON-compatible values.
 
 ## Compared to native Map
 
@@ -64,7 +65,8 @@ console.log(alice.get("k"), bob.get("k")); // same winner by tag id
 
 ## Benchmarks
 
-`npm run bench:crmap` runs `bench/crmap.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crmap.bench.js`.
 
 You can tune the run with environment variables:
 

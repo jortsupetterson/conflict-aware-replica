@@ -365,7 +365,7 @@ export class Dacument<S extends SchemaDefinition> {
   static map = map;
   static record = record;
 
-  static async computeSchemaId(schema: SchemaDefinition): Promise<SchemaId> {
+  private static async computeSchemaId(schema: SchemaDefinition): Promise<string> {
     const normalized = schemaIdInput(schema);
     const sortedKeys = Object.keys(normalized).sort();
     const ordered: Record<string, unknown> = {};

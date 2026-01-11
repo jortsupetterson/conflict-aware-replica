@@ -10,8 +10,8 @@ tombstones so replicas can merge without conflicts.
 - `merge(snapshotOrNode): DAGNode<T>[]` accepts a snapshot array or single node
   patch and returns the accepted nodes.
 - Array-like methods: `push`, `pop`, `unshift`, `shift`, `setAt`, `at`, `slice`,
-  `map`, `filter`, `reduce`, `forEach`, `includes`, `indexOf`, iterator, and
-  Proxy index access.
+  `map`, `filter`, `reduce`, `forEach`, `find`, `findIndex`, `every`, `some`,
+  `includes`, `indexOf`, iterator, and Proxy index access.
 
 ## How it works
 
@@ -39,11 +39,11 @@ Limitations:
 
 - Index writes are CRDT inserts rather than in-place mutation.
 - Deletes keep history, so memory can grow until you compact.
-- Many reads are O(n) because they rebuild the live view.
+- Many reads are O(n) because they scan live nodes.
 
 ## Complexity notes
 
-- `at` / index reads are O(n) because they rebuild the live view.
+- `at` / index reads are O(n) because they scan live nodes.
 - `setAt` / index writes are O(n log n) because they insert and sort.
 - `merge` is O(n log n) due to sorting after unioning snapshots.
 
@@ -74,7 +74,8 @@ console.log([...bob]); // same order as alice
 
 ## Benchmarks
 
-`npm run bench` runs `bench/crarray.bench.js`.
+`npm run bench` runs all CRDT micro-benchmarks. To run only this benchmark, use
+`node bench/crarray.bench.js`.
 
 You can tune the run with environment variables:
 
